@@ -60,6 +60,16 @@ def main(gcode_path, args):
     time.sleep(5)
     while ser.in_waiting:
         ser.readline()
+
+    # Firmware-level safety net: if the host/USB link dies mid-print (cable
+    # jostled loose from printer vibration, phone kills the process, etc.),
+    # the printer itself turns off its heaters after this many idle seconds
+    # with no new commands. This works independently of anything the host
+    # script can do once the connection is actually gone.
+    print(f"Setting inactivity shutdown timer (M85 S{args.idle_shutdown})...")
+    ser.write(f"M85 S{args.idle_shutdown}\n".encode())
+    wait_for_ok(ser)
+
     print("Connected. Starting print.\n")
     start_time = time.time()
     try:
@@ -74,9 +84,27 @@ def main(gcode_path, args):
         print(f"\nDone. {total} commands sent in {elapsed:.1f}s.")
     except KeyboardInterrupt:
         print("\nInterrupted - turning off heaters for safety.")
-        ser.write(b"M104 S0\n")
-        ser.write(b"M140 S0\n")
-        time.sleep(1)
+        try:
+            ser.write(b"M104 S0\n")
+            ser.write(b"M140 S0\n")
+            time.sleep(1)
+        except Exception as e:
+            print(f"  (heater-off command failed too: {e}; "
+                  f"relying on the M85 inactivity timer set at start)")
+    except Exception as e:
+        # Connection died mid-print (USB dropout, etc). The write below will
+        # usually fail too since the link is already gone - that's fine,
+        # the M85 timer set at the start of the print is the real safety
+        # net here, not this best-effort attempt.
+        print(f"\nPRINT FAILED: {type(e).__name__}: {e}")
+        print("Attempting heater-off anyway (may not succeed if the link is dead)...")
+        try:
+            ser.write(b"M104 S0\n")
+            ser.write(b"M140 S0\n")
+            time.sleep(1)
+        except Exception as e2:
+            print(f"  heater-off failed as expected: {e2}")
+        raise
     finally:
         ser.close()
 
@@ -84,6 +112,10 @@ def main(gcode_path, args):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Stream G-code over userspace CH340")
     ap.add_argument("gcode", help="path to .gcode file")
+    ap.add_argument("--idle-shutdown", type=int, default=300,
+                    help="M85 inactivity timer in seconds: firmware turns off "
+                         "heaters if it gets no commands for this long, "
+                         "independent of the host/USB connection (default 300)")
     ch.add_cli_args(ap)
     a = ap.parse_args()
     if a.baud != BAUD:
