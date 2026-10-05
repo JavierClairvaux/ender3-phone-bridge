@@ -7,7 +7,7 @@ plugins {
 // Build flags (all optional):
 //   -Pabi=arm64-v8a|x86_64   only package one ABI (phone: arm64-v8a, emulator: x86_64)
 //   -Pbackend=fake|real      default printer backend on first launch (runtime toggle overrides)
-//   -PappId=<id>             override applicationId (see APP_SUMMARY.md, real-device smoke test)
+//   -PappId=<id>             override applicationId (docs/USAGE.md)
 val onlyAbi = project.findProperty("abi") as String?
 val defaultBackend = (project.findProperty("backend") as String?) ?: "fake"
 val appIdOverride = project.findProperty("appId") as String?

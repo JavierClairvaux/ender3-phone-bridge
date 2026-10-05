@@ -5,3 +5,5 @@ local.properties
 # Local secrets (Telegram bot token / chat id): never check in
 tools/telegram_config.local.json
 *.local.json
+# Logs and screenshots written by the helper scripts (they can contain API tokens)
+evidence/

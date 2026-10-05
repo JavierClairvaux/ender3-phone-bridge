@@ -2,36 +2,52 @@
 
 A native Android app that runs on the phone attached to the Ender 3 and replaces the Termux scripts in the parent directory for everyday printing. It embeds the unmodified `ch340_serial.py` driver through [Chaquopy](https://chaquo.com/chaquopy/) (CPython inside the app) and talks to the printer through Android's USB Host API.
 
-It provides a foreground service that owns the connection and the print job, a native status UI, a web dashboard, a REST API, an MCP server (for Claude Code and other MCP clients) and Telegram notifications for print done/error.
+Features:
+
+- A foreground service that owns the USB connection and the print job, and survives backgrounding and screen-off.
+- A native status UI, a web dashboard, a REST API and an MCP server (for Claude Code and other MCP clients).
+- Pause with park, retract and reheat; resume restores the exact position and state.
+- Telegram notifications for print done and print error.
+- A built-in simulated Marlin (`fake` and `sim-usb` backends) for testing without a printer.
 
 ## Status
 
-Proven on real hardware (Redmi Note 9 Pro, LineageOS 22.2, Ender 3 / Marlin 1.1.6.2): connecting without resetting the board, heating, homing, leveling moves and full prints (a 7,329-line cube and a 4h23m, 352,009-line part, both with zero resends). Everything else (pause/park/reheat on a real print, unplug/replug, power-loss handling) is only tested against the built-in simulator. See `APP_SUMMARY.md` for what was and wasn't verified.
+Tested on a Redmi Note 9 Pro (LineageOS 22.2) with a stock Ender 3 (Marlin 1.1.6.2).
 
-Important design points, all learned on real hardware:
+Verified on real hardware:
+- Connecting and reconnecting without resetting the board.
+- Heating, homing and leveling moves from the API and MCP.
+- Full prints of 7,329, 147,423 and 352,009 lines (the longest took 4h23m), all with zero resends.
+- Dashboard, REST and MCP over Wi-Fi, and Telegram notifications to a real chat.
 
-- RX uses a queued reader (four 512-byte `UsbRequest`s kept in flight). Per-packet synchronous reads dropped bytes on the CH340.
-- DTR/RTS are never toggled while connected. Opening the USB device does not reset Marlin, only a DTR edge does, so the app can reconnect without disturbing a print or losing position.
-- `M85 S0` is sent whenever a job ends. On this firmware an `M85` timeout calls `kill()` and halts the board.
+Only tested against the simulator so far:
+- Pause, park and resume on a real print, including pausing during heat-up.
+- Unplug and replug during a print, the USB permission-denied path, and `/api/reset_board`.
+- Doze and battery-optimization behavior on the phone over a long print.
+
+## Quick start
+
+Needs JDK 21, the Android SDK and a phone with wireless ADB (the printer occupies the USB port).
+
+```bash
+./gradlew -Pabi=arm64-v8a -Pbackend=real assembleDebug     # phone build
+./gradlew -Pabi=x86_64 assembleDebug                        # emulator build
+./deploy_phone.sh connect <phone-ip>:<adb-port>
+./deploy_phone.sh install && ./deploy_phone.sh start
+```
+
+Then open `http://<phone-ip>:8080/`. Update with `adb install -r`; never uninstall, which wipes the settings, API token and USB permission.
 
 ## Docs
 
-- `APP_SUMMARY.md`: how to build, install, use, endpoints, validation evidence and remaining work.
-- `SUMMARY.md`, `PHASE2_SUMMARY.md`: the two spikes that proved Chaquopy + the real driver (simulated device, then real hardware).
-
-## Build
-
-```bash
-./gradlew -Pabi=arm64-v8a -Pbackend=real assembleDebug   # phone
-./gradlew -Pabi=x86_64 assembleDebug                      # emulator
-```
-
-Needs JDK 21 and the Android SDK (`local.properties` is not checked in). Install with `adb install -r` over the existing app to keep its settings and USB permission.
+- [`docs/USAGE.md`](docs/USAGE.md): install, backends, the safety lock, printing, pause and resume, leveling, Telegram, recovery and testing.
+- [`docs/API.md`](docs/API.md): REST and MCP reference with request and response examples.
+- [`docs/DESIGN.md`](docs/DESIGN.md): architecture, the hardware findings behind it, known limitations and the real-hardware test plan.
 
 ## Security notes
 
-- Control endpoints and the MCP endpoint require an API token. Plain HTTP: use a trusted LAN or Tailscale.
-- Known issue: the service currently logs the API token at startup. Don't share logcat output.
-- Telegram token and chat ID are entered in the app's settings and are never stored in this repo.
+- Control endpoints and `/mcp` need an API token over plain HTTP. Use a trusted LAN or Tailscale.
+- Known issue: the service logs the API token at startup, so don't share logcat output.
+- The Telegram bot token and chat ID are entered in the app and are never stored in this repo.
 
-`app/src/main/python/ch340_serial.py` is a copy of the driver in the parent directory.
+`app/src/main/python/ch340_serial.py` is a copy of the driver in the parent directory. `spike-archive/` holds the early Chaquopy spike code (including DTR-toggling test suites that must never ship). It isn't compiled.

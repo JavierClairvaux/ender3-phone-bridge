@@ -11,9 +11,8 @@
 #   ./deploy_phone.sh forward               # laptop 127.0.0.1:18081 -> phone :8080 (dashboard/API/MCP)
 #   ./deploy_phone.sh logcat                # dump app logcat to evidence/phone_logcat.txt
 #
-# APP_ID: defaults to com.javcabr.printerbridge. The real-device smoke test in
-# APP_SUMMARY.md used APP_ID=com.example.chaquopyspike to reuse the USB permission
-# the user had already granted to that package in phase 2.
+# APP_ID: defaults to com.javcabr.printerbridge. Set it to an id that already has the
+# USB "use by default" grant (e.g. an earlier install) to skip one permission dialog.
 set -euo pipefail
 ADB=~/Android/Sdk/platform-tools/adb
 cd "$(dirname "$0")"

@@ -25,7 +25,7 @@ enum class JobState { QUEUED, PRINTING, PAUSING, PAUSED, RESUMING, DONE, CANCELL
     val active get() = this == QUEUED || this == PRINTING || this == PAUSING || this == PAUSED || this == RESUMING
 }
 
-/** Pause/park behaviour (see APP_SUMMARY.md "Pause / resume"). */
+/** Pause/park behaviour (see docs/DESIGN.md "Pause design"). */
 data class PauseSettings(
     val parkEnabled: Boolean = true,
     val parkX: Double = 10.0,          // Marlin NOZZLE_PARK_POINT default: X_MIN+10

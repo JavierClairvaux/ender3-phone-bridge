@@ -52,7 +52,7 @@ class KotlinUsbBackend:
 
     def is_pipe_error(self, e):
         # Android's controlTransfer only returns -1: a STALL can't be told
-        # apart from other errors (irrelevant at 115200, see SUMMARY.md).
+        # apart from other errors (irrelevant at 115200, see docs/DESIGN.md).
         return False
 
     def bulk_read(self, size, timeout_ms):
