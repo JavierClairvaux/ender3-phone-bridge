@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Printer Bridge</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f4f4f2; --surface-1: #fcfcfb; --border: #dddcd6;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #77766f;
+  --grid: #e7e6e1;
+  --series-hotend: #eb6834; --series-bed: #2a78d6;
+  --good: #1a7f37; --warn: #9a6700; --bad: #c62828; --accent: #2a78d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-0: #111110; --surface-1: #1a1a19; --border: #33322f;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --grid: #2a2a28;
+    --series-hotend: #d95926; --series-bed: #3987e5;
+    --good: #4ac26b; --warn: #d29922; --bad: #ff6b6b; --accent: #3987e5;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #111110; --surface-1: #1a1a19; --border: #33322f;
+  --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+  --grid: #2a2a28;
+  --series-hotend: #d95926; --series-bed: #3987e5;
+  --good: #4ac26b; --warn: #d29922; --bad: #ff6b6b; --accent: #3987e5;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface-0); color: var(--text-primary);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1040px; margin: 0 auto; padding: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 12px; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-secondary); margin: 0 0 8px; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px; min-width: 0; }
+.wide { grid-column: 1 / -1; }
+.muted { color: var(--text-muted); }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+.ok .dot { background: var(--good); } .warn .dot { background: var(--warn); } .bad .dot { background: var(--bad); }
+.big { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; font-variant-numeric: tabular-nums; }
+.kv dt { color: var(--text-secondary); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+.bar { height: 10px; background: var(--grid); border-radius: 5px; overflow: hidden; margin: 8px 0; }
+.bar > div { height: 100%; background: var(--accent); border-radius: 5px; transition: width .4s; }
+.temps { display: flex; gap: 24px; flex-wrap: wrap; }
+.swatch { display: inline-block; width: 12px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+button, select, input { font: inherit; color: var(--text-primary); background: var(--surface-0); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+button { cursor: pointer; } button:hover { border-color: var(--accent); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--text-secondary); font-weight: 500; font-size: 12px; }
+.tablewrap { overflow-x: auto; }
+#chart { position: relative; }
+#chart svg { display: block; width: 100%; height: 220px; }
+#tip { position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 8px; font-size: 12px; display: none; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
+#msg { min-height: 1.4em; color: var(--text-secondary); }
+code { font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Printer Bridge</h1>
+    <span id="connPill" class="pill"><span class="dot"></span><span id="connText">loading</span></span>
+    <span class="muted" id="updated"></span>
+  </header>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Print job</h2>
+      <div id="jobState" class="big">-</div>
+      <div id="jobFile" class="muted"></div>
+      <div class="bar"><div id="jobBar" style="width:0%"></div></div>
+      <dl class="kv">
+        <dt>Progress</dt><dd id="jobProg">-</dd>
+        <dt>Elapsed</dt><dd id="jobElapsed">-</dd>
+        <dt>Remaining</dt><dd id="jobRemaining">-</dd>
+        <dt>Resends</dt><dd id="jobResends">-</dd>
+        <dt>Error</dt><dd id="jobError">-</dd>
+        <dt>In flight</dt><dd id="jobInFlight">-</dd>
+        <dt>Pause</dt><dd id="jobPause">-</dd>
+      </dl>
+      <div class="row">
+        <button data-act="pause">Pause</button><button data-act="resume">Resume</button><button data-act="cancel">Cancel</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Temperatures</h2>
+      <div class="temps">
+        <div><div class="muted"><span class="swatch" style="background:var(--series-hotend)"></span>Hotend</div><div class="big" id="tH">-</div><div class="muted" id="tHt"></div></div>
+        <div><div class="muted"><span class="swatch" style="background:var(--series-bed)"></span>Bed</div><div class="big" id="tB">-</div><div class="muted" id="tBt"></div></div>
+      </div>
+      <dl class="kv" style="margin-top:10px">
+        <dt>Position (last M114)</dt><dd id="pos">-</dd>
+      </dl>
+      <div class="row"><button data-act="check_temps">Read temps now</button><button data-act="home">Home (G28)</button></div>
+    </section>
+
+    <section class="card wide">
+      <h2>Temperature history (°C)</h2>
+      <div class="legend">
+        <span><span class="swatch" style="background:var(--series-hotend)"></span>Hotend</span>
+        <span><span class="swatch" style="background:var(--series-bed)"></span>Bed</span>
+        <span class="muted">dashed = target</span>
+      </div>
+      <div id="chart"><svg id="svg" role="img" aria-label="Hotend and bed temperature over time"></svg><div id="tip"></div></div>
+    </section>
+
+    <section class="card">
+      <h2>Start a print</h2>
+      <div class="row"><select id="fileSel" style="flex:1;min-width:0"></select><button id="startBtn">Start</button></div>
+      <div class="row"><input type="file" id="upload" accept=".gcode,.gco,.g" style="flex:1;min-width:0"><button id="uploadBtn">Upload</button></div>
+      <div class="row"><label class="muted" for="tok">API token</label><input id="tok" type="password" style="flex:1;min-width:0" placeholder="needed for control actions"></div>
+      <div id="msg"></div>
+    </section>
+
+    <section class="card">
+      <h2>Connection</h2>
+      <dl class="kv" id="connKv"></dl>
+    </section>
+
+    <section class="card wide">
+      <h2>Print history</h2>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Ended</th><th>File</th><th>State</th><th>Progress</th><th>Duration</th><th>Error</th></tr></thead>
+        <tbody id="hist"><tr><td colspan="6" class="muted">none yet</td></tr></tbody>
+      </table></div>
+    </section>
+  </div>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const qs = new URLSearchParams(location.search);
+let token = qs.get("token") || "";
+try { token = token || localStorage.getItem("pb_token") || ""; } catch (e) {}
+$("tok").value = token;
+$("tok").addEventListener("change", () => { token = $("tok").value.trim(); try { localStorage.setItem("pb_token", token); } catch (e) {} });
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({}, opts.headers || {});
+  if (token) headers["Authorization"] = "Bearer " + token;
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  const txt = await r.text();
+  let body; try { body = JSON.parse(txt); } catch (e) { body = { raw: txt }; }
+  if (!r.ok) throw new Error((body && body.error) || ("HTTP " + r.status));
+  return body;
+}
+const post = (path, obj) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(obj || {}) });
+const say = t => { $("msg").textContent = t; };
+const fmtDur = s => s == null ? "-" : (s >= 3600 ? Math.floor(s / 3600) + "h " : "") + Math.floor(s % 3600 / 60) + "m " + (s % 60) + "s";
+const n1 = v => v == null ? "-" : Number(v).toFixed(1);
+
+document.querySelectorAll("button[data-act]").forEach(b => b.addEventListener("click", async () => {
+  const act = b.dataset.act;
+  if (act === "cancel" && !confirm("Cancel the print? Heaters will be turned off.")) return;
+  if (act === "home" && !confirm("Home all axes (G28)?")) return;
+  say(act + "...");
+  try { const r = await post("/api/" + act); say(act + ": ok"); } catch (e) { say(act + " failed: " + e.message); }
+  refresh();
+}));
+$("startBtn").addEventListener("click", async () => {
+  const f = $("fileSel").value; if (!f) return;
+  try { await post("/api/print", { file: f }); say("started " + f); } catch (e) { say("start failed: " + e.message); }
+  refresh();
+});
+$("uploadBtn").addEventListener("click", async () => {
+  const f = $("upload").files[0]; if (!f) return;
+  say("uploading " + f.name + "...");
+  try { await api("/api/files/" + encodeURIComponent(f.name), { method: "PUT", body: f }); say("uploaded " + f.name); loadFiles(); }
+  catch (e) { say("upload failed: " + e.message); }
+});
+
+async function loadFiles() {
+  try {
+    const r = await api("/api/files");
+    const sel = $("fileSel"), cur = sel.value;
+    sel.innerHTML = "";
+    r.files.forEach(f => { const o = document.createElement("option"); o.value = f.name; o.textContent = f.name + " (" + Math.round(f.bytes / 1024) + " KB)"; sel.appendChild(o); });
+    if (cur) sel.value = cur;
+  } catch (e) {}
+}
+
+function renderStatus(s) {
+  const c = s.connection, st = c.state;
+  $("connPill").className = "pill " + (st === "connected" ? (c.halted ? "bad" : "ok") : st === "error" ? "bad" : "warn");
+  $("connText").textContent = (c.backend || "no backend") + ": " + st + (c.halted ? " (HALTED)" : "");
+  $("updated").textContent = "updated " + new Date(s.server_time).toLocaleTimeString();
+  const j = s.job;
+  if (j) {
+    $("jobState").textContent = j.state.toUpperCase();
+    $("jobFile").textContent = j.file;
+    $("jobBar").style.width = j.progress_pct + "%";
+    $("jobProg").textContent = j.progress_pct + "%  (" + j.lines_done + " / " + j.lines_total + " lines)";
+    $("jobElapsed").textContent = fmtDur(j.elapsed_s);
+    $("jobRemaining").textContent = j.remaining_s == null ? "-" : fmtDur(j.remaining_s) + " (" + j.remaining_source.replace("_", " ") + ")";
+    $("jobResends").textContent = j.resends;
+    $("jobError").textContent = j.error || "-";
+    $("jobInFlight").textContent = j.in_flight ? j.in_flight + " (" + j.in_flight_s + "s)" : "-";
+    const pz = j.pause;
+    let pt = "-";
+    if (pz) {
+      const sv = pz.saved || {};
+      pt = pz.stage.replace(/_/g, " ") + (pz.parked && pz.stage !== "parked" ? ", parked" : "") + (pz.park_skipped ? " (not parked: " + pz.park_skipped + ")" : "") +
+        (pz.retracted_mm ? ", retracted " + pz.retracted_mm + " mm" : "") +
+        (pz.nozzle_cooled ? ", nozzle cooled (will reheat to " + sv.hotend_target + "°)" : (pz.nozzle_standby_in_s != null ? ", nozzle cools in " + fmtDur(pz.nozzle_standby_in_s) : "")) +
+        (sv.x != null ? " | saved X" + sv.x + " Y" + sv.y + " Z" + sv.z : "") + " | targets " + sv.hotend_target + "°/" + sv.bed_target + "°";
+    }
+    if (j.pause_requested) pt += " | pause requested";
+    if (j.cancel_requested) pt += " | cancel requested";
+    $("jobPause").textContent = pt;
+  } else { $("jobState").textContent = "IDLE"; $("jobFile").textContent = "no job yet"; }
+  const t = s.temps;
+  $("tH").textContent = n1(t.hotend) + "°"; $("tHt").textContent = "target " + n1(t.hotend_target) + "°";
+  $("tB").textContent = n1(t.bed) + "°"; $("tBt").textContent = "target " + n1(t.bed_target) + "°";
+  const p = s.position;
+  $("pos").textContent = p.known ? `X ${p.x}  Y ${p.y}  Z ${p.z}  E ${p.e}` : "unknown";
+  const d = c.details || {}, sv = s.service || {};
+  const rows = [["Backend", c.backend], ["State", st + (c.error ? " - " + c.error : "")], ["Firmware", c.firmware], ["Machine", c.machine_type],
+    ["USB device", d.usb_device], ["Chip", d.chip_version], ["DTR/RTS sent", d.dtr_rts_values_sent], ["DTR ever asserted", d.dtr_ever_asserted],
+    ["Reset seen on open", d.reset_detected_on_open], ["Safety lock", d.safety_lock], ["Lines sent", c.lines_sent_total],
+    ["Last line in", c.last_rx], ["Service uptime", fmtDur(sv.uptime_s)], ["URLs", (sv.urls || []).join("  ")],
+    ["Doze / screen", (sv.device_idle_mode ? "doze" : "not dozing") + " / " + (sv.interactive ? "on" : "off")], ["Wake lock", sv.wake_lock_held]];
+  $("connKv").innerHTML = "";
+  rows.filter(r => r[1] !== undefined && r[1] !== null && r[1] !== "").forEach(([k, v]) => {
+    const dt = document.createElement("dt"); dt.textContent = k; const dd = document.createElement("dd"); dd.textContent = String(v);
+    $("connKv").append(dt, dd);
+  });
+}
+
+function renderHistory(h) {
+  const tb = $("hist"); tb.innerHTML = "";
+  if (!h.length) { tb.innerHTML = '<tr><td colspan="6" class="muted">none yet</td></tr>'; return; }
+  h.forEach(j => {
+    const tr = document.createElement("tr");
+    [j.ended_at ? new Date(j.ended_at).toLocaleString() : "-", j.file, j.state, j.progress_pct + "%", fmtDur(j.elapsed_s), j.error || ""]
+      .forEach(v => { const td = document.createElement("td"); td.textContent = v; tr.appendChild(td); });
+    tb.appendChild(tr);
+  });
+}
+
+// ---- temperature chart: one °C axis, hotend (orange) + bed (blue), dashed targets, crosshair tooltip
+let chartData = [];
+function renderChart(hist) {
+  chartData = hist;
+  const svg = $("svg"), W = svg.clientWidth || 600, H = 220, m = { l: 36, r: 12, t: 8, b: 22 };
+  const cs = getComputedStyle(document.documentElement);
+  const col = k => cs.getPropertyValue(k).trim();
+  if (!hist.length) { svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="${col("--text-muted")}" font-size="12">no samples yet</text>`; return; }
+  const t0 = hist[0][0], t1 = Math.max(hist[hist.length - 1][0], t0 + 60000);
+  const ymax = Math.max(50, ...hist.map(r => Math.max(r[1], r[2], r[3], r[4]))) * 1.08;
+  const x = t => m.l + (t - t0) / (t1 - t0) * (W - m.l - m.r), y = v => H - m.b - v / ymax * (H - m.t - m.b);
+  let g = "";
+  const step = ymax > 200 ? 50 : 25;
+  for (let v = 0; v <= ymax; v += step) g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="${col("--grid")}" stroke-width="1"/>` +
+    `<text x="${m.l - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="${col("--text-muted")}">${v}</text>`;
+  const mins = (t1 - t0) / 60000;
+  const tick = mins > 20 ? 5 : mins > 6 ? 2 : 1;
+  for (let k = 0; k <= mins; k += tick) g += `<text x="${x(t0 + k * 60000)}" y="${H - 6}" text-anchor="middle" font-size="11" fill="${col("--text-muted")}">-${Math.round(mins - k)}m</text>`;
+  const path = i => hist.map((r, k) => (k ? "L" : "M") + x(r[0]).toFixed(1) + "," + y(r[i]).toFixed(1)).join("");
+  g += `<path d="${path(2)}" fill="none" stroke="${col("--series-hotend")}" stroke-width="1.5" stroke-dasharray="5 4" opacity=".8"/>`;
+  g += `<path d="${path(4)}" fill="none" stroke="${col("--series-bed")}" stroke-width="1.5" stroke-dasharray="5 4" opacity=".8"/>`;
+  g += `<path d="${path(1)}" fill="none" stroke="${col("--series-hotend")}" stroke-width="2" stroke-linejoin="round"/>`;
+  g += `<path d="${path(3)}" fill="none" stroke="${col("--series-bed")}" stroke-width="2" stroke-linejoin="round"/>`;
+  g += `<line id="xh" x1="0" x2="0" y1="${m.t}" y2="${H - m.b}" stroke="${col("--text-muted")}" stroke-width="1" visibility="hidden"/>`;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = g;
+  svg.onmousemove = ev => {
+    const rect = svg.getBoundingClientRect(), px = (ev.clientX - rect.left) * W / rect.width;
+    const tt = t0 + (px - m.l) / (W - m.l - m.r) * (t1 - t0);
+    let best = chartData[0]; for (const r of chartData) if (Math.abs(r[0] - tt) < Math.abs(best[0] - tt)) best = r;
+    const xh = $("xh"); xh.setAttribute("x1", x(best[0])); xh.setAttribute("x2", x(best[0])); xh.setAttribute("visibility", "visible");
+    const tip = $("tip"); tip.style.display = "block";
+    tip.innerHTML = `<div class="muted">${new Date(best[0]).toLocaleTimeString()}</div>` +
+      `<div><span class="swatch" style="background:var(--series-hotend)"></span>Hotend ${best[1].toFixed(1)}° / ${best[2].toFixed(0)}°</div>` +
+      `<div><span class="swatch" style="background:var(--series-bed)"></span>Bed ${best[3].toFixed(1)}° / ${best[4].toFixed(0)}°</div>`;
+    const left = Math.min(ev.clientX - rect.left + 12, rect.width - tip.offsetWidth - 4);
+    tip.style.left = Math.max(0, left) + "px"; tip.style.top = "8px";
+  };
+  svg.onmouseleave = () => { $("tip").style.display = "none"; const xh = $("xh"); if (xh) xh.setAttribute("visibility", "hidden"); };
+}
+
+let tick = 0;
+async function refresh() {
+  try {
+    const s = await api("/api/status"); renderStatus(s);
+    if (tick % 3 === 0) { const t = await api("/api/temps"); renderChart(t.history.slice(-300)); }
+    if (tick % 5 === 0) { const h = await api("/api/history?limit=20"); renderHistory(h.history); }
+    if (tick % 15 === 0) loadFiles();
+  } catch (e) { $("connText").textContent = "dashboard offline: " + e.message; $("connPill").className = "pill bad"; }
+  tick++;
+}
+refresh(); setInterval(refresh, 1000);
+</script>
+</body>
+</html>

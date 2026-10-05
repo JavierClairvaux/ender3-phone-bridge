@@ -4,6 +4,8 @@ These scripts drive a Creality Ender 3 (Marlin 1.1.6.2) from a rooted Android ph
 
 > **Status: confirmed working on real hardware.** Tested on a rooted Redmi Note 9 (LineageOS, Termux, `pyusb` backend) against a real Ender 3: chip version read back correctly, `M115` returned the real firmware banner after a DTR-triggered reboot, `M105` temp polling worked, `G28` physically homed all three axes, and a full ~3900-line sliced print job streamed and completed end to end with no kernel serial driver involved at any point. Use the numbered steps below to reproduce it on your own device.
 
+> **Android app:** there is now also a native Android app in [`android-app/`](android-app/) that drives the printer through Android's USB Host API (via Chaquopy, reusing `ch340_serial.py`) and adds a dashboard, REST API, MCP server and Telegram notifications. The Termux scripts below still work.
+
 ## Files
 
 | File | Purpose | Talks to printer? |
