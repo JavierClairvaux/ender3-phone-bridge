@@ -53,7 +53,8 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: v
 .temps { display: flex; gap: 24px; flex-wrap: wrap; }
 .swatch { display: inline-block; width: 12px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
 button, select, input { font: inherit; color: var(--text-primary); background: var(--surface-0); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
-button { cursor: pointer; } button:hover { border-color: var(--accent); }
+button { cursor: pointer; } button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: not-allowed; }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
@@ -105,7 +106,7 @@ code { font-size: 12px; }
       <dl class="kv" style="margin-top:10px">
         <dt>Position (last M114)</dt><dd id="pos">-</dd>
       </dl>
-      <div class="row"><button data-act="check_temps">Read temps now</button><button data-act="home">Home (G28)</button></div>
+      <div class="row"><button data-act="check_temps">Read temps now</button><button data-act="home" id="homeBtn" data-motion disabled title="Waiting for printer status">Home (G28)</button></div>
     </section>
 
     <section class="card wide">
@@ -120,7 +121,7 @@ code { font-size: 12px; }
 
     <section class="card">
       <h2>Start a print</h2>
-      <div class="row"><select id="fileSel" style="flex:1;min-width:0"></select><button id="startBtn">Start</button></div>
+      <div class="row"><select id="fileSel" style="flex:1;min-width:0"></select><button id="startBtn" data-motion disabled title="Waiting for printer status">Start</button></div>
       <div class="row"><input type="file" id="upload" accept=".gcode,.gco,.g" style="flex:1;min-width:0"><button id="uploadBtn">Upload</button></div>
       <div class="row"><label class="muted" for="tok">API token</label><input id="tok" type="password" style="flex:1;min-width:0" placeholder="needed for control actions"></div>
       <div id="msg"></div>
@@ -164,6 +165,7 @@ const fmtDur = s => s == null ? "-" : (s >= 3600 ? Math.floor(s / 3600) + "h " :
 const n1 = v => v == null ? "-" : Number(v).toFixed(1);
 
 document.querySelectorAll("button[data-act]").forEach(b => b.addEventListener("click", async () => {
+  if (b.disabled) return;
   const act = b.dataset.act;
   if (act === "cancel" && !confirm("Cancel the print? Heaters will be turned off.")) return;
   if (act === "home" && !confirm("Home all axes (G28)?")) return;
@@ -172,6 +174,7 @@ document.querySelectorAll("button[data-act]").forEach(b => b.addEventListener("c
   refresh();
 }));
 $("startBtn").addEventListener("click", async () => {
+  if ($("startBtn").disabled) return;
   const f = $("fileSel").value; if (!f) return;
   try { await post("/api/print", { file: f }); say("started " + f); } catch (e) { say("start failed: " + e.message); }
   refresh();
@@ -193,8 +196,23 @@ async function loadFiles() {
   } catch (e) {}
 }
 
+// Motion/heater controls (Home, Start) are disabled while a job owns the printer. The server
+// refuses them too (409); this just stops a mis-click, e.g. on a paused, parked print.
+const ACTIVE_JOB_STATES = ["queued", "printing", "pausing", "paused", "resuming"];
+function setMotionControls(job, connected) {
+  const active = !!job && ACTIVE_JOB_STATES.includes(job.state);
+  const why = active ? "Disabled: a print job is " + job.state + ". Homing or starting another print would move the head; cancel or finish the job first."
+            : !connected ? "Disabled: printer not connected" : "";
+  document.querySelectorAll("button[data-motion]").forEach(b => {
+    b.disabled = active || !connected;
+    b.title = why || (b.id === "homeBtn" ? "Home all axes (G28)" : "Start the selected file");
+  });
+  document.body.dataset.motionLocked = String(active || !connected);
+}
+
 function renderStatus(s) {
   const c = s.connection, st = c.state;
+  setMotionControls(s.job, st === "connected" && !c.halted);
   $("connPill").className = "pill " + (st === "connected" ? (c.halted ? "bad" : "ok") : st === "error" ? "bad" : "warn");
   $("connText").textContent = (c.backend || "no backend") + ": " + st + (c.halted ? " (HALTED)" : "");
   $("updated").textContent = "updated " + new Date(s.server_time).toLocaleTimeString();
@@ -299,7 +317,7 @@ async function refresh() {
     if (tick % 3 === 0) { const t = await api("/api/temps"); renderChart(t.history.slice(-300)); }
     if (tick % 5 === 0) { const h = await api("/api/history?limit=20"); renderHistory(h.history); }
     if (tick % 15 === 0) loadFiles();
-  } catch (e) { $("connText").textContent = "dashboard offline: " + e.message; $("connPill").className = "pill bad"; }
+  } catch (e) { $("connText").textContent = "dashboard offline: " + e.message; $("connPill").className = "pill bad"; setMotionControls(null, false); }
   tick++;
 }
 refresh(); setInterval(refresh, 1000);

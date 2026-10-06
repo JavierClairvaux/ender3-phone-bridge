@@ -8,6 +8,7 @@ plugins {
 //   -Pabi=arm64-v8a|x86_64   only package one ABI (phone: arm64-v8a, emulator: x86_64)
 //   -Pbackend=fake|real      default printer backend on first launch (runtime toggle overrides)
 //   -PappId=<id>             override applicationId (docs/USAGE.md)
+//   -PbuildPython=<path>     Python 3.13 interpreter used at build time (default: python3.13 on PATH)
 val onlyAbi = project.findProperty("abi") as String?
 val defaultBackend = (project.findProperty("backend") as String?) ?: "fake"
 val appIdOverride = project.findProperty("appId") as String?
@@ -39,11 +40,28 @@ android {
     packaging { resources.excludes += "META-INF/*" }
 }
 
+// Embedded Python version. 3.13 (not 3.14) because Chaquopy's package index only has Android
+// builds of some native packages (e.g. `cryptography`) up to cp313.
+val pythonVersion = "3.13"
+
+// Build-time interpreter: must have the SAME major.minor as `pythonVersion` (Chaquopy uses it
+// to compile .py -> .pyc). Override with -PbuildPython=/path/to/python3.13; default: `python3.13`
+// on PATH (e.g. installed with `uv python install 3.13`).
+val buildPythonCmd: String = (project.findProperty("buildPython") as String?) ?: "python$pythonVersion"
+fun resolveOnPath(cmd: String): File? {
+    if (cmd.contains(File.separatorChar)) return File(cmd).takeIf { it.canExecute() }
+    return System.getenv("PATH").orEmpty().split(File.pathSeparatorChar)
+        .map { File(it, cmd) }.firstOrNull { it.isFile && it.canExecute() }
+}
+val buildPythonExe: File = resolveOnPath(buildPythonCmd) ?: throw GradleException(
+    "Python $pythonVersion build interpreter '$buildPythonCmd' not found. Install Python $pythonVersion " +
+    "(for example `uv python install $pythonVersion`, which puts python$pythonVersion in ~/.local/bin) " +
+    "or pass -PbuildPython=/path/to/python$pythonVersion.")
+
 chaquopy {
     defaultConfig {
-        version = "3.14"
-        // Must be the same major.minor as `version`; compiles .py -> .pyc at build time.
-        buildPython("/usr/bin/python3")
+        version = pythonVersion
+        buildPython(buildPythonExe.absolutePath)
     }
 }
 

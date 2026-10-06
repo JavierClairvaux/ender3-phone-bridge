@@ -114,7 +114,8 @@ All three return within about 1.5 s with the true state; poll `/api/status` for 
 | `POST /api/check_temps` | none | fresh `M105`; returns the temps object |
 | `POST /api/gcode` | `{"command": "M114"}` | sends one line; returns `{"command": "M114", "reply": ["X:0.00 ...", "ok"]}` |
 
-- While a job is active, `/api/home` and any motion or heater command through `/api/gcode` return 409; only `M105`, `M114`, `M115`, `M119` and `M503` are allowed then.
+- While a job is active (state `queued`, `printing`, `pausing`, `paused` or `resuming`), `/api/home`, `/api/reset_board` and any motion or heater command through `/api/gcode` return 409 with an `error` starting `refused: a print job is <state>; ...`. Only `M105`, `M114`, `M115`, `M119` and `M503` are allowed then. The refusal is immediate even while the printer is busy with a heat wait or a park move, and nothing is sent to the printer. Paused counts as active: the head is parked and returns to the saved position on resume.
+- The dashboard disables its Home and Start buttons in those states (and while disconnected); the server check above is the real guard.
 - With the **real-printer safety lock on** (the default), `/api/home` is also refused (403), and `/api/gcode` allows only `M115`, `M105`, `M503`, `M114` and `M119`; anything else returns 403 `SafetyLockException`.
 - Replies can include `echo:busy: processing` lines during long commands such as `G28`.
 
@@ -191,7 +192,7 @@ curl -X POST $B/mcp -H "$H" -H 'Content-Type: application/json' -H 'Accept: appl
 | `pause` | none | `POST /api/pause` |
 | `resume` | none | `POST /api/resume` |
 | `cancel` | none | `POST /api/cancel` |
-| `home` | none | `POST /api/home` (refused during a print) |
+| `home` | none | `POST /api/home`; `isError: true` with a `refused: ...` message in any active job state, including paused |
 | `check_temps` | none | `POST /api/check_temps` |
 | `list_print_history` | `limit` (integer, default 20) | `GET /api/history` |
 

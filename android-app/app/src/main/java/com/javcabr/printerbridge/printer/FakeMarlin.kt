@@ -146,9 +146,13 @@ class FakeMarlin {
         "%sT:%.2f /%.2f B:%.2f /%.2f @:%d B@:%d", if (ok) "ok " else "", hotend, hotendTarget, bed, bedTarget,
         if (hotendTarget > hotend) 127 else 0, if (bedTarget > bed) 127 else 0)
 
+    /** Test hook: while true the simulated firmware doesn't process input (commands stay unanswered). */
+    @Volatile var holdCommands = false
+
     private fun commandLoop() {
         while (true) {
             val raw = input.take()
+            while (holdCommands) Thread.sleep(20)
             try { process(raw) } catch (t: Throwable) { Log.e(TAG, "fake marlin failed on '$raw'", t) }
         }
     }

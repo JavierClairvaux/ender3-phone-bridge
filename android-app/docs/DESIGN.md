@@ -36,6 +36,10 @@ Code is under `app/src/main/java/com/javcabr/printerbridge/` and `app/src/main/p
 
 `ch340_serial.py` is never modified. The Kotlin backend replaces the driver's USB layer by subclassing, so the real driver code runs against Android's USB API.
 
+**Embedded Python is 3.13**, not the newest 3.14: Chaquopy's package index only has Android builds of some native packages (notably `cryptography`, needed for future in-app ACME/TLS work) up to cp313. The build compiles the Python sources with a matching host interpreter (`-PbuildPython`, default `python3.13` on `PATH`).
+
+**An active job owns the printer.** In every active state (`queued`, `printing`, `pausing`, `paused`, `resuming`) the controller refuses homing, board reset and any non-read-only G-code. The check runs once in the caller's thread (so the 409 is immediate even while the worker sits in a heat wait or a park move) and again on the worker before anything is sent. `paused` is the case that matters most: the head is parked and returns to the saved position on resume, so a manual move in between would wreck the print. The dashboard mirrors this by disabling Home and Start, but the server check is the guard.
+
 ## What the hardware taught us
 
 These findings drive the rules the app follows. All were observed on a Redmi Note 9 Pro and a stock Ender 3.
@@ -95,8 +99,6 @@ Do this with the printer watched, using a short part such as a 20 mm cube:
 
 Security notes (plain HTTP, token logging) are in the [README](../README.md#security-notes).
 
-
 - A lost connection or app crash mid-print ends the job as an error. There's no resume from a line number. The restarted app doesn't know whether the board's `M85` timer is armed.
 - Cancel can't interrupt an in-flight heat wait.
-- The dashboard's Home button is always enabled. The server refuses homing during a print (409), but the button should be greyed out while a job is active.
 - Line numbers, checksums and `Resend` handling have only been exercised against the simulator, so the real error wording from Marlin 1.1.6 is unverified.

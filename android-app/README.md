@@ -1,6 +1,6 @@
 # Printer Bridge: Android app
 
-A native Android app that runs on the phone attached to the Ender 3 and replaces the Termux scripts in the parent directory for everyday printing. It embeds the unmodified `ch340_serial.py` driver through [Chaquopy](https://chaquo.com/chaquopy/) (CPython inside the app) and talks to the printer through Android's USB Host API.
+A native Android app that runs on the phone attached to the Ender 3 and replaces the Termux scripts in the parent directory for everyday printing. It embeds the unmodified `ch340_serial.py` driver through [Chaquopy](https://chaquo.com/chaquopy/) (CPython 3.13 inside the app) and talks to the printer through Android's USB Host API.
 
 Features:
 
@@ -27,11 +27,14 @@ Only tested against the simulator so far:
 
 ## Quick start
 
-Needs JDK 21, the Android SDK and a phone with wireless ADB (the printer occupies the USB port).
+Needs JDK 21, the Android SDK, a **Python 3.13** interpreter for the build, and a phone with wireless ADB (the printer occupies the USB port).
+
+The app embeds Python 3.13 (Chaquopy), and the build needs a matching 3.13 interpreter to precompile the Python sources. By default it looks for `python3.13` on `PATH`. One way to get it without touching the system Python: `uv python install 3.13` (puts `python3.13` in `~/.local/bin`). Or point the build at any 3.13 interpreter with `-PbuildPython=/path/to/python3.13`. The build stops with an explanatory error if none is found.
 
 ```bash
 ./gradlew -Pabi=arm64-v8a -Pbackend=real assembleDebug     # phone build
 ./gradlew -Pabi=x86_64 assembleDebug                        # emulator build
+# add -PbuildPython=/path/to/python3.13 if python3.13 isn't on PATH
 ./deploy_phone.sh connect <phone-ip>:<adb-port>
 ./deploy_phone.sh install && ./deploy_phone.sh start
 ```

@@ -293,7 +293,12 @@ class PrinterController(
     }
 
     /** G28, then M114. Refused while a job is active. */
-    fun home(): JSONObject = call("home", 120_000) {
+    fun home(): JSONObject {
+        refuseIfJobActive()   // fast 409 even while the worker is busy inside a heat wait / park
+        return homeTask()
+    }
+
+    private fun homeTask(): JSONObject = call("home", 120_000) {
         requireIdleConnected()
         val r = sendAndWait("G28", numbered = false)
         sendAndWait("M114", numbered = false)
@@ -309,18 +314,32 @@ class PrinterController(
         return tempsJson()
     }
 
-    /** Send one ad-hoc command and return the reply lines. While printing, only M105/M114/M115/M119/M503. */
-    fun sendGcode(cmd: String): JSONObject = call("gcode", 120_000) {
+    /** Send one ad-hoc command and return the reply lines. While a job is active, only M105/M114/M115/M119/M503. */
+    fun sendGcode(cmd: String): JSONObject {
+        if (RealPrinterConnection.commandWord(cmd) !in RealPrinterConnection.READ_ONLY) refuseIfJobActive(gcode = true)
+        return gcodeTask(cmd)
+    }
+
+    private fun gcodeTask(cmd: String): JSONObject = call("gcode", 120_000) {
         val c = conn ?: throw IllegalStateException("printer not connected")
         if (!c.isOpen) throw IllegalStateException("printer not connected")
         val j = job
-        if (j != null && j.state == JobState.PRINTING && RealPrinterConnection.commandWord(cmd) !in RealPrinterConnection.READ_ONLY)
-            throw BusyException("printing: only read-only commands allowed (pause first)")
+        // Any active job state (queued/printing/pausing/paused/resuming) owns the machine: a paused
+        // job is parked and will move back to its saved position on resume, so manual motion or
+        // heater changes in between would ruin the print or crash the head.
+        if (j != null && j.state.active && RealPrinterConnection.commandWord(cmd) !in RealPrinterConnection.READ_ONLY)
+            throw BusyException("refused: a print job is ${j.state.wire}; only read-only commands " +
+                "(${RealPrinterConnection.READ_ONLY.joinToString()}) are allowed until it is done or cancelled")
         JSONObject().put("command", cmd).put("reply", JSONArray(sendAndWait(cmd.trim(), numbered = false)))
     } as JSONObject
 
     /** Deliberate board reboot (DTR pulse on real hardware). Never called implicitly. */
-    fun resetBoard(): JSONObject = call("reset_board", 10_000) {
+    fun resetBoard(): JSONObject {
+        refuseIfJobActive()
+        return resetTask()
+    }
+
+    private fun resetTask(): JSONObject = call("reset_board", 10_000) {
         requireIdleConnected()
         val c = conn!!
         // Discard anything already queued from before the reboot (e.g. the rest of a
@@ -713,10 +732,21 @@ class PrinterController(
         conn = null
     }
 
+    /** Caller-thread pre-check (the worker re-checks authoritatively before sending anything). */
+    private fun refuseIfJobActive(gcode: Boolean = false) {
+        val j = job ?: return
+        if (!j.state.active) return
+        throw BusyException(if (gcode) "refused: a print job is ${j.state.wire}; only read-only commands " +
+            "(${RealPrinterConnection.READ_ONLY.joinToString()}) are allowed until it is done or cancelled"
+            else "refused: a print job is ${j.state.wire}; homing, motion and board reset are not allowed until it is done or cancelled")
+    }
+
     private fun requireIdleConnected() {
         val c = conn
         if (c == null || !c.isOpen) throw IllegalStateException("printer not connected")
-        if (job?.state?.active == true) throw BusyException("a job is ${job?.state?.wire}")
+        val j = job
+        if (j != null && j.state.active) throw BusyException("refused: a print job is ${j.state.wire}; homing, motion and " +
+            "board reset are not allowed until it is done or cancelled")
     }
 
     private fun pollTempsIfDue(everyMs: Long) {

@@ -32,6 +32,8 @@ The real backend starts with a safety lock that allows only `M115`, `M105`, `M50
 1. Slice for the printer. Put the bed temperature directly into `machine_start_gcode` (`M140 S60` / `M190 S60`); OrcaSlicer's CLI resolves the bed-temperature placeholder wrongly for this profile.
 2. Upload: `curl -T part.gcode -H "$H" $B/api/files/part.gcode`.
 3. Start: `POST /api/print {"file": "part.gcode"}` (or the dashboard, or the MCP `start_print`). The sliced start G-code homes the printer, so no separate home is needed.
+
+While a job is active (queued, printing, pausing, paused or resuming) the printer belongs to the job: Home, starting another print, motion or heater G-code and board reset are refused by the server (409, or `isError` over MCP), and the dashboard greys out its Home and Start buttons (hover for the reason). This matters most when **paused**: the head is parked and will travel back to the saved position on resume, so a manual home or move in between would ruin the print. Read-only commands (`M105`, `M114`, `M115`, `M119`, `M503`) still work. The buttons come back once the job is done, cancelled or failed.
 4. Watch the first layer, then monitor from the dashboard (`http://<phone-ip>:8080/`), the API, or Telegram.
 
 The laptop isn't involved once the job starts: it runs entirely on the phone. If the phone loses the printer or the app dies, the printer halts itself after 5 minutes of silence (the `M85` cutoff) with the heaters off.
@@ -71,4 +73,4 @@ Use the `fake` or `sim-usb` backend and the scripts in `tools/`:
 - `tools/doze_test.sh`: runs a long simulated print with the screen off and deep Doze forced.
 - `tools/phone_smoke.sh`: a read-only (`M115`) smoke test on the real phone; set `PHONE_ADB=<phone-ip>:<adb-port>`.
 
-The instrumented tests (`./gradlew connectedDebugAndroidTest`, needs an emulator or device) cover the driver path, resends, pause/resume, the `M85` timer and the disconnect handling.
+The instrumented tests (`./gradlew connectedDebugAndroidTest`, needs an emulator or device) cover the driver path, resends, pause/resume, the `M85` timer, the disconnect handling, and that homing, motion, heater and reset commands are refused (with nothing sent) in every active job state. `tools/e2e_fake.py` also checks the REST/MCP refusals and, with headless chromium, that the dashboard's Home and Start buttons are disabled mid-print and while paused and enabled again when idle.

@@ -483,4 +483,77 @@ class PrinterBridgeInstrumentedTest {
     }
 
     private fun fmt(v: Double) = String.format(java.util.Locale.US, "%.3f", v).trimEnd('0').trimEnd('.')
+
+    // ---------------------------------------------------------------- no homing/motion while a job is active
+
+    @Test
+    fun homeMotionHeaterAndReset_refusedInEveryActiveJobState_nothingSent() {
+        val ev = Events()
+        val (ctl, gdir) = controller(ev, "guard", pauseSettings(standbyS = 1, idleShutdownS = 300))
+        val marlin = FakeMarlin().apply { lineDelayMs = 20; timeScale = 6.0 }
+        val mcp = com.javcabr.printerbridge.server.McpHandler { ctl }
+        ctl.connect(FakePrinterConnection(marlin))
+        val probes = listOf("G28", "G1 X11 Y11 F3000", "M104 S123", "M140 S77", "G92 E0")
+        fun mcpCall(name: String, args: JSONObject = JSONObject()): JSONObject = JSONObject(mcp.handle(JSONObject()
+            .put("jsonrpc", "2.0").put("id", 1).put("method", "tools/call")
+            .put("params", JSONObject().put("name", name).put("arguments", args)).toString()).body!!).getJSONObject("result")
+        val checked = mutableListOf<String>()
+
+        fun tryAll(expected: String) {
+            assertEquals(expected, jobState(ctl).getString("state"))
+            val idx = marlin.commandLog.size
+            val boots = marlin.bootCount
+            fun refused(what: String, f: () -> Any?) {
+                val t0 = System.currentTimeMillis()
+                try { f(); fail("$what was accepted in state $expected") } catch (e: com.javcabr.printerbridge.printer.BusyException) {
+                    assertTrue("$what message: ${e.message}", e.message!!.contains("refused") && e.message!!.contains(expected))
+                }
+                assertTrue("$what refusal took ${System.currentTimeMillis() - t0} ms", System.currentTimeMillis() - t0 < 1000)
+            }
+            refused("home") { ctl.home() }
+            refused("reset_board") { ctl.resetBoard() }
+            for (g in listOf("G1 X11 Y11 F3000", "M104 S123", "M140 S77", "G92 E0", "G28 X")) refused("gcode $g") { ctl.sendGcode(g) }
+            val m = mcpCall("home")
+            assertTrue("MCP home isError in $expected", m.getBoolean("isError"))
+            assertTrue(m.getJSONArray("content").getJSONObject(0).getString("text").contains("refused"))
+            Thread.sleep(300)
+            val sentNow = marlin.commandLog.drop(idx)
+            assertTrue("probe commands reached the printer in $expected: $sentNow", sentNow.none { c -> probes.any { c == it || c.startsWith("G28 X") } })
+            assertEquals(boots, marlin.bootCount)
+            checked += expected
+        }
+
+        val name = parkFile(gdir, "guard.gcode", 400)
+        // queued: freeze the simulated firmware so the job can't leave QUEUED (M110 stays unanswered)
+        marlin.holdCommands = true
+        ctl.startPrint(name)
+        tryAll("queued")
+        marlin.holdCommands = false
+        // printing, with a heat wait in flight (worker busy: refusal must still be immediate)
+        waitFor(30_000, "M190 in flight") { jobState(ctl).optString("in_flight").startsWith("M190") }
+        tryAll("printing")
+        // pausing: pause requested while M190 is still in flight
+        ctl.pause()
+        tryAll("pausing")
+        // paused (parked)
+        waitFor(60_000, "paused") { jobState(ctl).getString("state") == "paused" }
+        tryAll("paused")
+        // read-only commands still work while paused
+        assertTrue(ctl.sendGcode("M105").getJSONArray("reply").toString().contains("ok"))
+        // resuming: nozzle cooled by the 1 s standby, so resume waits on M109
+        waitFor(5000, "standby cooldown") { marlin.hotendTarget == 0.0 }
+        Thread.sleep(1500)
+        ctl.resume()
+        waitFor(5000, "resuming with reheat in flight") { jobState(ctl).getString("state") == "resuming" && jobState(ctl).optString("in_flight").startsWith("M10") }
+        tryAll("resuming")
+        // after the job ends, homing is allowed again
+        ctl.cancel()
+        waitFor(60_000, "cancelled") { ev.finished.size == 1 }
+        assertEquals("cancelled", ev.finished[0].getString("state"))
+        val idx = marlin.commandLog.size
+        assertTrue(ctl.home().getBoolean("ok"))
+        assertTrue(marlin.commandLog.drop(idx).contains("G28"))
+        assertEquals(listOf("queued", "printing", "pausing", "paused", "resuming"), checked)
+        Log.i(TAG, "PASS home/motion/heater/reset refused (direct + MCP) in $checked; home allowed after cancel")
+    }
 }

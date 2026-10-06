@@ -75,6 +75,19 @@ def screenshot(name):
     return path
 
 
+def dashboard_dom():
+    """Fresh page load in headless chromium, JS run, DOM returned (like a user opening it mid-print)."""
+    r = subprocess.run(["chromium", "--headless=new", "--disable-gpu", "--dump-dom", "--virtual-time-budget=6000", args.base + "/"],
+                       capture_output=True, text=True, timeout=90)
+    return r.stdout
+
+
+def button_tag(dom, bid):
+    import re
+    m = re.search(r'<button[^>]*id="%s"[^>]*>' % bid, dom)
+    return m.group(0) if m else ""
+
+
 def wait(pred, timeout, what, every=0.5):
     end = time.time() + timeout
     while time.time() < end:
@@ -277,6 +290,60 @@ async def main():
         check("no_m85_kill_while_idle", s["connection"]["halted"] is False and s["connection"]["details"]["sim_halted"] is False,
               s["connection"]["last_rx"])
         rest("POST", "/api/sim/config", {"time_scale": 5})
+
+        # ---------------- F: no homing / motion while a job is active; dashboard locks Home + Start ----------------
+        rest("POST", "/api/sim/config", {"line_delay_ms": 40, "time_scale": 5})
+        n_tg5 = len(tg_messages())
+        c, r = rest("POST", "/api/print", {"file": args.file})
+        wait(lambda: job().get("state") == "printing" and job().get("lines_done", 0) > 120, 300, "printing F")
+
+        def guarded(label):
+            d0 = status()["connection"]["details"]
+            res = []
+            c1, b1 = rest("POST", "/api/home")
+            res.append(("rest_home", c1 == 409 and "refused" in b1.get("error", ""), c1, b1.get("error")))
+            for g in ("G1 X11 Y11 F3000", "M104 S123", "G28"):
+                c2, b2 = rest("POST", "/api/gcode", {"command": g})
+                res.append(("rest_gcode " + g, c2 == 409 and "refused" in b2.get("error", ""), c2, b2.get("error")))
+            return d0, res
+
+        d0, res = guarded("printing")
+        e, m = await tool("home")
+        res.append(("mcp_home", e is True and "refused" in str(m), None, str(m)[:120]))
+        check("printing_refuses_home_and_motion_rest_and_mcp", all(x[1] for x in res), res)
+        dom = dashboard_dom()
+        hb, sb = button_tag(dom, "homeBtn"), button_tag(dom, "startBtn")
+        check("dashboard_home_disabled_mid_print", "disabled" in hb and "disabled" in sb and 'data-motion-locked="true"' in dom
+              and "a print job is printing" in hb, hb)
+        screenshot("dashboard_home_disabled_printing")
+
+        ok_p, rp = (await tool("pause"))
+        wait(lambda: job().get("state") == "paused", 30, "paused F")
+        time.sleep(1)
+        before = status()["connection"]["details"]
+        d0, res = guarded("paused")
+        e, m = await tool("home")
+        res.append(("mcp_home", e is True and "refused" in str(m), None, str(m)[:120]))
+        time.sleep(1)
+        after = status()["connection"]["details"]
+        same = all(before[k] == after[k] for k in ("sim_non_report_commands", "sim_x", "sim_y", "sim_z", "sim_e", "sim_hotend_target", "sim_bed_target"))
+        check("paused_refuses_home_and_motion_and_nothing_sent", all(x[1] for x in res) and same,
+              {"results": res, "non_report_before": before["sim_non_report_commands"], "after": after["sim_non_report_commands"]})
+        dom = dashboard_dom()
+        hb = button_tag(dom, "homeBtn")
+        check("dashboard_home_disabled_while_paused", "disabled" in hb and "a print job is paused" in hb, hb)
+        screenshot("dashboard_home_disabled_paused")
+
+        await tool("cancel")
+        wait(lambda: job().get("state") == "cancelled", 60, "cancelled F")
+        time.sleep(1.5)
+        dom = dashboard_dom()
+        hb, sb = button_tag(dom, "homeBtn"), button_tag(dom, "startBtn")
+        check("dashboard_home_enabled_when_idle", "disabled" not in hb and "disabled" not in sb and 'data-motion-locked="false"' in dom, hb)
+        screenshot("dashboard_home_enabled_idle")
+        c, r = rest("POST", "/api/home")
+        check("rest_home_allowed_when_idle", c == 200 and r.get("ok") is True, c)
+        check("no_telegram_from_phase_f", len(tg_messages()) == n_tg5)
 
     with open(args.out + "_timeline.json", "w") as f:
         json.dump(timeline, f, indent=0)
