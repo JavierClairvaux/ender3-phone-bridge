@@ -62,6 +62,10 @@ chaquopy {
     defaultConfig {
         version = pythonVersion
         buildPython(buildPythonExe.absolutePath)
+        pip {
+            // TLS (self-signed cert, PKCS12). 42.0.8 is the newest Android cp313 build on Chaquopy's index.
+            install("cryptography==42.0.8")
+        }
     }
 }
 

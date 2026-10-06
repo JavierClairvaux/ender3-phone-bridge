@@ -23,6 +23,14 @@ interface BridgeHost {
     fun simulateError(kind: String): JSONObject
     fun applyRuntimeSettings()
     fun serviceInfo(): JSONObject
+    /** GET /api/tls: certificate + issuance status (no secrets). */
+    fun tlsStatus(): JSONObject
+    /** POST /api/tls/issue: start an ACME issuance in the background; returns the job status at once. */
+    fun tlsIssue(): JSONObject
+    /** POST /api/tls/self_signed: replace the certificate with a new self-signed one. */
+    fun tlsSelfSigned(confirm: Boolean): JSONObject
+    fun tlsChainPem(): String?
+    fun tlsCaPem(): String?
 }
 
 /**
@@ -34,7 +42,8 @@ interface BridgeHost {
  * "Authorization: Bearer <token>" (or "X-Api-Token: <token>", or ?token=).
  * GET endpoints (dashboard, status, temps, history) are readable without it.
  */
-class ApiServer(private val context: Context, port: Int, private val host: BridgeHost) : NanoHTTPD("0.0.0.0", port) {
+class ApiServer(private val context: Context, bindHost: String, port: Int, private val host: BridgeHost,
+                val secure: Boolean = false) : NanoHTTPD(bindHost, port) {
     private val mcp = McpHandler { host.controller }
 
     override fun serve(s: IHTTPSession): Response {
@@ -51,9 +60,20 @@ class ApiServer(private val context: Context, port: Int, private val host: Bridg
                 is IOException -> 502
                 else -> 500
             }
-            if (code == 500) Log.e(TAG, "error on ${s.method} $path", e)
-            json(code, JSONObject().put("error", e.message ?: e.toString()).put("type", e.javaClass.simpleName))
+            if (code == 500) Log.e(TAG, "error on ${s.method} $path: ${e.javaClass.simpleName}")
+            // org.json syntax errors quote the whole input, which may contain a secret: never echo it.
+            val msg = if (e is org.json.JSONException && (e.message ?: "").contains(" at character ")) "malformed JSON body"
+                      else redact(e.message ?: e.toString())
+            json(code, JSONObject().put("error", msg).put("type", e.javaClass.simpleName))
         }
+    }
+
+    /** Removes the GoDaddy credentials (and their halves) from any text that leaves the server. */
+    private fun redact(t: String): String {
+        val sec = try { host.settings.secrets.get(com.javcabr.printerbridge.service.SecretStore.GODADDY) } catch (e: Exception) { null } ?: return t
+        var out = t
+        for (part in listOf(sec) + sec.split(':').filter { it.length >= 6 }) out = out.replace(part, "<redacted>")
+        return out
     }
 
     private fun authorized(s: IHTTPSession): Boolean {
@@ -123,6 +143,13 @@ class ApiServer(private val context: Context, port: Int, private val host: Bridg
                 json(200, host.settings.telegramJson())
             }
             path == "/api/config/telegram/test" -> json(200, host.telegram.sendTest())
+            path == "/api/tls" && m == Method.GET -> json(200, host.tlsStatus())
+            path == "/api/tls/cert.pem" && m == Method.GET -> host.tlsChainPem()?.let { newFixedLengthResponse(Response.Status.OK, "application/x-pem-file", it) }
+                ?: json(404, JSONObject().put("error", "no certificate"))
+            path == "/api/tls/ca.pem" && m == Method.GET -> host.tlsCaPem()?.let { newFixedLengthResponse(Response.Status.OK, "application/x-pem-file", it) }
+                ?: json(404, JSONObject().put("error", "no certificate"))
+            path == "/api/tls/issue" && m == Method.POST -> json(202, host.tlsIssue())
+            path == "/api/tls/self_signed" && m == Method.POST -> json(200, host.tlsSelfSigned(jbody(s).optBoolean("confirm")))
             path == "/api/config" && m == Method.GET -> json(200, configJson())
             path == "/api/config" -> { val applied = host.settings.apply(jbody(s)); host.applyRuntimeSettings(); json(200, configJson().put("applied", applied)) }
             path == "/api/sim/error" -> json(200, host.simulateError(jbody(s).optString("kind", "thermal_runaway")))
@@ -148,6 +175,7 @@ class ApiServer(private val context: Context, port: Int, private val host: Bridg
             .put("fake_inject_resend_every", st.fakeInjectResendEvery).put("telegram", st.telegramJson())
             .put("api_token_set", st.apiToken.isNotEmpty())
             .put("pause", st.pauseJson())
+            .put("tls", st.tlsJson())
     }
 
     private fun contentLength(s: IHTTPSession): Long = s.headers["content-length"]?.toLongOrNull() ?: 0L
@@ -193,8 +221,8 @@ class ApiServer(private val context: Context, port: Int, private val host: Bridg
     companion object {
         const val TAG = "PrinterBridge.http"
         const val MAX_UPLOAD = 64L * 1024 * 1024
-        val REASONS = mapOf(200 to "OK", 400 to "Bad Request", 401 to "Unauthorized", 403 to "Forbidden", 404 to "Not Found",
+        val REASONS = mapOf(200 to "OK", 202 to "Accepted", 400 to "Bad Request", 401 to "Unauthorized", 403 to "Forbidden", 404 to "Not Found",
             405 to "Method Not Allowed", 409 to "Conflict", 500 to "Internal Server Error", 502 to "Bad Gateway")
-        val GET_OK = setOf("/api/connection", "/api/config", "/api/config/telegram")
+        val GET_OK = setOf("/api/connection", "/api/config", "/api/config/telegram", "/api/tls", "/api/tls/cert.pem", "/api/tls/ca.pem")
     }
 }

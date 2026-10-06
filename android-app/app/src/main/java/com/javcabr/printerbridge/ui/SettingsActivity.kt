@@ -46,6 +46,17 @@ class SettingsActivity : Activity() {
         val retract = edit("Retract on pause (mm)", s.pauseRetractMm.toString())
         val purge = edit("Extra purge on resume (mm)", s.pauseExtraPurgeMm.toString())
         val standby = edit("Cool nozzle after paused for (s; 0 = never)", s.pauseNozzleStandbyS.toString())
+        col.addView(TextView(this).apply { text = "\nHTTP / HTTPS"; textSize = 18f })
+        val httpOn = check("Plain HTTP listener (port ${s.httpPort})", s.httpEnabled)
+        val httpLocal = check("Plain HTTP only on localhost (127.0.0.1)", s.httpBind == "127.0.0.1")
+        val tlsOn = check("HTTPS (TLS) listener", s.tlsEnabled)
+        val httpsPort = edit("HTTPS port", s.httpsPort.toString())
+        val tlsDomain = edit("TLS host name (e.g. printer.example.com)", s.tlsDomain)
+        col.addView(TextView(this).apply { text = "\nLet's Encrypt (DNS-01 via GoDaddy)"; textSize = 18f })
+        val acmeEmail = edit("ACME account e-mail", s.acmeEmail)
+        val acmeDir = edit("ACME directory: staging or production", s.acmeDirectory)
+        val gd = edit("GoDaddy API KEY:SECRET (write-only; " + (if (s.secrets.has(com.javcabr.printerbridge.service.SecretStore.GODADDY)) "currently set" else "not set") + "; leave empty to keep)", "", secret = true)
+        val gdClear = check("Delete the stored GoDaddy credentials", false)
         col.addView(TextView(this).apply { text = "\nSimulator (fake backend)"; textSize = 18f })
         val delay = edit("Fake per-line delay (ms)", s.fakeLineDelayMs.toString())
         val scale = edit("Fake time scale (temperature/homing speed-up)", s.fakeTimeScale.toString())
@@ -68,6 +79,17 @@ class SettingsActivity : Activity() {
                     retract.text.toString().toDoubleOrNull()?.let { s.pauseRetractMm = it }
                     purge.text.toString().toDoubleOrNull()?.let { s.pauseExtraPurgeMm = it }
                     standby.text.toString().toIntOrNull()?.let { s.pauseNozzleStandbyS = it }
+                } catch (e: IllegalArgumentException) { result.text = "Not saved: ${e.message}"; return@setOnClickListener }
+                try {
+                    val o = org.json.JSONObject().put("http_enabled", httpOn.isChecked)
+                        .put("http_bind", if (httpLocal.isChecked) "127.0.0.1" else "0.0.0.0")
+                        .put("tls_enabled", tlsOn.isChecked).put("tls_domain", tlsDomain.text.toString())
+                        .put("acme_email", acmeEmail.text.toString()).put("acme_directory", acmeDir.text.toString().trim())
+                    httpsPort.text.toString().toIntOrNull()?.let { o.put("https_port", it) }
+                    if (gdClear.isChecked) o.put("godaddy_credentials", "")
+                    else if (gd.text.isNotEmpty()) o.put("godaddy_credentials", gd.text.toString().trim())
+                    s.apply(o)
+                    gd.setText("")
                 } catch (e: IllegalArgumentException) { result.text = "Not saved: ${e.message}"; return@setOnClickListener }
                 PrinterService.instance?.applyRuntimeSettings()
                 result.text = "Saved."

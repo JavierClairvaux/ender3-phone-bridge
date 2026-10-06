@@ -16,6 +16,8 @@ import java.security.SecureRandom
  */
 class AppSettings(context: Context) {
     val prefs: SharedPreferences = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+    /** Encrypted store for secrets (GoDaddy credentials, keystore password). */
+    val secrets = SecretStore(context)
 
     init {
         if (!prefs.contains(K_API_TOKEN)) prefs.edit().putString(K_API_TOKEN, randomToken()).apply()
@@ -88,6 +90,42 @@ class AppSettings(context: Context) {
         .put("pause_park_y", pauseParkY).put("pause_z_raise_mm", pauseZRaiseMm).put("pause_retract_mm", pauseRetractMm)
         .put("pause_extra_purge_mm", pauseExtraPurgeMm).put("pause_nozzle_standby_s", pauseNozzleStandbyS)
 
+    // HTTP / HTTPS listeners
+    var httpEnabled: Boolean
+        get() = prefs.getBoolean("http_enabled", true)
+        set(v) = prefs.edit().putBoolean("http_enabled", v).apply()
+    var httpBind: String
+        get() = prefs.getString("http_bind", "0.0.0.0") ?: "0.0.0.0"
+        set(v) { require(v == "0.0.0.0" || v == "127.0.0.1") { "http_bind must be 0.0.0.0 or 127.0.0.1" }; prefs.edit().putString("http_bind", v).apply() }
+    var tlsEnabled: Boolean
+        get() = prefs.getBoolean("tls_enabled", false)
+        set(v) = prefs.edit().putBoolean("tls_enabled", v).apply()
+    var httpsPort: Int
+        get() = prefs.getInt("https_port", 8443)
+        set(v) { require(v in 1..65535) { "https_port must be 1..65535" }; prefs.edit().putInt("https_port", v).apply() }
+
+    // ACME (Let's Encrypt, DNS-01 via GoDaddy)
+    var tlsDomain: String
+        get() = prefs.getString("tls_domain", "") ?: ""
+        set(v) { val d = v.trim().lowercase(); require(d.isEmpty() || Regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$").matches(d)) { "tls_domain is not a valid host name" }; prefs.edit().putString("tls_domain", d).apply() }
+    var tlsDnsZone: String
+        get() = prefs.getString("tls_dns_zone", "") ?: ""
+        set(v) = prefs.edit().putString("tls_dns_zone", v.trim().lowercase()).apply()
+    var acmeDirectory: String
+        get() = prefs.getString("acme_directory", "staging") ?: "staging"
+        set(v) { require(v == "staging" || v == "production") { "acme_directory must be staging or production" }; prefs.edit().putString("acme_directory", v).apply() }
+    var acmeEmail: String
+        get() = prefs.getString("acme_email", "") ?: ""
+        set(v) { val e = v.trim(); require(e.isEmpty() || Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$").matches(e)) { "acme_email is not an e-mail address" }; prefs.edit().putString("acme_email", e).apply() }
+
+    /** DNS zone (the GoDaddy domain) for tls_domain: tls_dns_zone, else its last two labels. */
+    fun effectiveZone(): String = tlsDnsZone.ifEmpty { tlsDomain.split('.').takeLast(2).joinToString(".") }
+
+    fun tlsJson(): JSONObject = JSONObject().put("tls_enabled", tlsEnabled).put("https_port", httpsPort)
+        .put("http_enabled", httpEnabled).put("http_bind", httpBind).put("tls_domain", tlsDomain)
+        .put("tls_dns_zone", tlsDnsZone).put("acme_directory", acmeDirectory).put("acme_email", acmeEmail)
+        .put("godaddy_credentials_set", secrets.has(SecretStore.GODADDY))
+
     // telegram
     var telegramToken: String
         get() = prefs.getString("telegram_token", "") ?: ""
@@ -123,6 +161,10 @@ class AppSettings(context: Context) {
 
     /** Apply keys from a JSON object (REST body / config file). Returns the keys applied. */
     fun apply(o: JSONObject): List<String> {
+        // Validate the listener combination BEFORE changing anything, so a rejected request is a no-op.
+        val newHttp = if (o.has("http_enabled")) o.getBoolean("http_enabled") else httpEnabled
+        val newTls = if (o.has("tls_enabled")) o.getBoolean("tls_enabled") else tlsEnabled
+        require(newHttp || newTls) { "refusing to turn off both HTTP and HTTPS (the API would become unreachable); nothing was changed" }
         val applied = mutableListOf<String>()
         fun has(k: String) = o.has(k).also { if (it) applied.add(k) }
         if (has("backend")) backend = o.getString("backend")
@@ -149,6 +191,24 @@ class AppSettings(context: Context) {
         if (has("pause_retract_mm")) pauseRetractMm = o.getDouble("pause_retract_mm")
         if (has("pause_extra_purge_mm")) pauseExtraPurgeMm = o.getDouble("pause_extra_purge_mm")
         if (has("pause_nozzle_standby_s")) pauseNozzleStandbyS = o.getInt("pause_nozzle_standby_s")
+        if (has("tls_enabled")) tlsEnabled = o.getBoolean("tls_enabled")
+        if (has("https_port")) httpsPort = o.getInt("https_port")
+        if (has("http_enabled")) httpEnabled = o.getBoolean("http_enabled")
+        if (has("http_bind")) httpBind = o.getString("http_bind")
+        if (has("tls_domain")) tlsDomain = o.getString("tls_domain")
+        if (has("tls_dns_zone")) tlsDnsZone = o.getString("tls_dns_zone")
+        if (has("acme_directory")) acmeDirectory = o.getString("acme_directory")
+        if (has("acme_email")) acmeEmail = o.getString("acme_email")
+        if (o.has("godaddy_credentials")) {
+            // Secret: stored encrypted, never echoed. Errors must not include the value.
+            applied.add("godaddy_credentials")
+            val v = o.opt("godaddy_credentials") as? String ?: throw IllegalArgumentException("godaddy_credentials must be a string")
+            if (v.isEmpty()) secrets.remove(SecretStore.GODADDY)
+            else {
+                require(Regex("^[A-Za-z0-9_\\-]+:[A-Za-z0-9_\\-]+$").matches(v)) { "godaddy_credentials must have the form KEY:SECRET" }
+                secrets.put(SecretStore.GODADDY, v)
+            }
+        }
         return applied
     }
 

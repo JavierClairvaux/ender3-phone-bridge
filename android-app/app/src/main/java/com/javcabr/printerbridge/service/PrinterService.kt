@@ -62,8 +62,16 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
     override lateinit var controller: PrinterController
     override lateinit var settings: AppSettings
     override lateinit var telegram: TelegramNotifier
-    private var server: ApiServer? = null
-    private var serverError: String? = null
+    // HTTP/HTTPS listeners; (re)configured only on the "net-config" thread (see reconfigureServers)
+    lateinit var tls: TlsManager
+    @Volatile private var httpServer: ApiServer? = null
+    @Volatile private var httpsServer: ApiServer? = null
+    @Volatile private var httpError: String? = null
+    @Volatile private var httpsError: String? = null
+    private var httpKey: String? = null
+    @Volatile private var httpsCertStamp = 0L
+    private var httpsKey: String? = null
+    private val netExec = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "net-config").apply { isDaemon = true } }
     private lateinit var usb: UsbManager
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -99,6 +107,9 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
         override fun run() {
             updateNotification()
             updateLocks()
+            // hot-reload HTTPS when the keystore file was replaced (ACME renewal, regeneration, adb push)
+            if (::tls.isInitialized && settings.tlsEnabled && httpsServer != null && tls.certStamp() != httpsCertStamp)
+                reconfigureServers("certificate changed")
             if (n++ % 15 == 0L) heartbeat()
             handler.postDelayed(this, 2000)
         }
@@ -110,6 +121,7 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
         settings = AppSettings(this)
         settings.importConfigFile(getExternalFilesDir(null))
         telegram = TelegramNotifier(settings)
+        tls = TlsManager(this, settings, settings.secrets)
         usb = getSystemService(Context.USB_SERVICE) as UsbManager
         createChannel()
         val n = buildNotification("Starting", null)
@@ -117,13 +129,14 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
         else startForeground(NOTIF_ID, n)
         controller = PrinterController(File(filesDir, "history.json"), File(filesDir, "gcode").apply { mkdirs() }, this, settings.controllerSettings())
         applyRuntimeSettings()
-        startServer()
+        reconfigureServers("start")
         val f = IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED); addAction(UsbManager.ACTION_USB_DEVICE_DETACHED); addAction(ACTION_USB_PERMISSION)
         }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(usbReceiver, f, RECEIVER_NOT_EXPORTED) else registerReceiver(usbReceiver, f)
         handler.post(ticker)
-        Log.i(TAG, "service created: backend=${settings.backend} port=${settings.httpPort} api_token=${settings.apiToken}")
+        Log.i(TAG, "service created: backend=${settings.backend} http=${settings.httpEnabled}@${settings.httpBind}:${settings.httpPort} " +
+            "tls=${settings.tlsEnabled}:${settings.httpsPort} api_token_set=${settings.apiToken.isNotEmpty()}")
     }
 
     private var firstStart = true
@@ -150,7 +163,8 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
         Log.i(TAG, "service destroyed")
         handler.removeCallbacksAndMessages(null)
         try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
-        server?.stop()
+        netExec.execute { httpServer?.stop(); httpsServer?.stop() }
+        netExec.shutdown()
         Thread { runCatching { controller.disconnect() } }.start()
         wakeLock?.takeIf { it.isHeld }?.release()
         wifiLock?.takeIf { it.isHeld }?.release()
@@ -205,6 +219,9 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
     }
 
     override fun applyRuntimeSettings() {
+        // listener changes (ports, bind, TLS on/off) apply shortly after, so the HTTP response
+        // carrying the config change still gets out before its listener may restart
+        if (::tls.isInitialized) handler.postDelayed({ reconfigureServers("settings") }, 400)
         controller.settings = settings.controllerSettings()
         FakeMarlin.shared.lineDelayMs = settings.fakeLineDelayMs
         FakeMarlin.shared.timeScale = settings.fakeTimeScale
@@ -214,11 +231,19 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
     override fun serviceInfo(): JSONObject {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         val port = settings.httpPort
+        val urls = mutableListOf<String>()
+        if (httpServer != null) urls += if (settings.httpBind == "127.0.0.1") listOf("http://127.0.0.1:$port/") else ipv4Addresses().map { "http://$it:$port/" }
+        if (httpsServer != null) {
+            if (settings.tlsDomain.isNotEmpty()) urls += "https://${settings.tlsDomain}:${settings.httpsPort}/"
+            urls += ipv4Addresses().map { "https://$it:${settings.httpsPort}/" }
+        }
         return JSONObject()
             .put("uptime_s", (SystemClock.elapsedRealtime() - createdAt) / 1000)
             .put("backend_setting", settings.backend)
-            .put("http_port", port).put("http_error", serverError ?: JSONObject.NULL)
-            .put("urls", JSONArray(ipv4Addresses().map { "http://$it:$port/" }))
+            .put("http_port", port).put("http_enabled", settings.httpEnabled).put("http_bind", settings.httpBind)
+            .put("http_running", httpServer != null).put("http_error", httpError ?: JSONObject.NULL)
+            .put("tls", tls.shortJson(httpsServer != null))
+            .put("urls", JSONArray(urls))
             .put("wake_lock_held", wakeLock?.isHeld == true).put("wifi_lock_held", wifiLock?.isHeld == true)
             .put("device_idle_mode", pm.isDeviceIdleMode).put("interactive", pm.isInteractive)
             .put("ignoring_battery_optimizations", pm.isIgnoringBatteryOptimizations(packageName))
@@ -244,14 +269,73 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
 
     // ------------------------------------------------------------------ internals
 
-    private fun startServer() {
-        try {
-            server = ApiServer(this, settings.httpPort, this).also { it.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false) }
-            Log.i(TAG, "HTTP server on 0.0.0.0:${settings.httpPort} urls=${ipv4Addresses()}")
-        } catch (e: IOException) {
-            serverError = e.toString(); Log.e(TAG, "HTTP server failed", e)
+    /**
+     * Brings the listeners in line with the settings and the current certificate. Runs on the
+     * single "net-config" thread, never on printer-io, so a print job is unaffected. Restarting
+     * the HTTPS listener (hot reload) drops in-flight HTTPS connections for a moment only.
+     */
+    fun reconfigureServers(reason: String) {
+        if (netExec.isShutdown) return
+        netExec.execute {
+            try { doReconfigure(reason) } catch (t: Throwable) { Log.e(TAG, "reconfigure ($reason) failed: ${t.javaClass.simpleName}: ${t.message}") }
         }
     }
+
+    private fun doReconfigure(reason: String) {
+        val timeout = fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT
+        // plain HTTP
+        val hk = "${settings.httpBind}:${settings.httpPort}"
+        if (!settings.httpEnabled || hk != httpKey) {
+            httpServer?.let { it.stop(); Log.i(TAG, "HTTP listener stopped ($reason)") }
+            httpServer = null; httpKey = null
+        }
+        if (settings.httpEnabled && httpServer == null) {
+            try {
+                httpServer = ApiServer(this, settings.httpBind, settings.httpPort, this).also { it.start(timeout, false) }
+                httpKey = hk; httpError = null
+                Log.i(TAG, "HTTP listener on $hk ($reason)")
+            } catch (e: IOException) { httpError = e.toString(); Log.e(TAG, "HTTP listener failed: $e") }
+        }
+        // HTTPS
+        if (settings.tlsEnabled) {
+            try { tls.ensureCert() } catch (e: Exception) { httpsError = "certificate: ${e.javaClass.simpleName}"; Log.e(TAG, "self-signed certificate failed", e) }
+        }
+        val wantHttps = settings.tlsEnabled && tls.hasCert()
+        val stamp = tls.certStamp()
+        val sk = "${settings.httpsPort}:$stamp"
+        if (!wantHttps || sk != httpsKey) {
+            httpsServer?.let { it.stop(); Log.i(TAG, "HTTPS listener stopped ($reason)") }
+            httpsServer = null; httpsKey = null
+        }
+        if (wantHttps && httpsServer == null) {
+            try {
+                val srv = ApiServer(this, "0.0.0.0", settings.httpsPort, this, secure = true)
+                srv.makeSecure(tls.sslServerSocketFactory(), null)
+                srv.start(timeout, false)
+                httpsServer = srv; httpsKey = sk; httpsCertStamp = stamp; httpsError = null
+                val info = tls.certInfo()
+                Log.i(TAG, "HTTPS listener on 0.0.0.0:${settings.httpsPort} ($reason), cert ${info?.optString("subject_cn")} " +
+                    "issuer ${info?.optString("issuer_cn")} serial ${info?.optString("serial")} expires ${info?.optString("not_after")}")
+            } catch (e: Exception) { httpsError = "${e.javaClass.simpleName}: ${e.message}"; Log.e(TAG, "HTTPS listener failed: $httpsError") }
+        }
+    }
+
+    // ------------------------------------------------------------------ TLS (BridgeHost)
+
+    override fun tlsStatus(): JSONObject = tls.statusJson(httpsServer != null, httpsError)
+
+    override fun tlsSelfSigned(confirm: Boolean): JSONObject {
+        if (tls.source() == "acme" && !confirm)
+            throw IllegalArgumentException("the current certificate was issued by ACME; send {\"confirm\": true} to replace it with a self-signed one")
+        tls.makeSelfSigned()
+        reconfigureServers("self-signed certificate regenerated")
+        return tlsStatus()
+    }
+
+    override fun tlsIssue(): JSONObject = throw IllegalStateException("ACME issuance is not available in this build")
+
+    override fun tlsChainPem(): String? = if (tls.hasCert()) tls.chainPem() else null
+    override fun tlsCaPem(): String? = if (tls.hasCert()) tls.caPem() else null
 
     private fun updateLocks() {
         val jobActive = controller.statusJson().optJSONObject("job")?.optString("state") in setOf("queued", "printing", "pausing", "paused", "resuming")
