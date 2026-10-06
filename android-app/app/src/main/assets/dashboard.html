@@ -30,7 +30,7 @@ body { margin: 0; min-height: 100vh; color: var(--text); font: 14px/1.5 system-u
 .topbar { position: sticky; top: 0; z-index: 10; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
   background: color-mix(in srgb, var(--bg) 78%, transparent); border-bottom: 1px solid var(--border); }
 .topbar-in { max-width: 1180px; margin: 0 auto; padding: 10px 20px; display: flex; align-items: center; gap: 12px; }
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: -.01em; min-width: 0; }
+.brand { white-space: nowrap; flex: none; display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: -.01em; min-width: 0; }
 .logo { width: 30px; height: 30px; border-radius: 9px; flex: none; display: grid; place-items: center; color: #fff;
   background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 45%, transparent); }
 .logo svg { width: 18px; height: 18px; }
@@ -46,7 +46,7 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
 .c-chart, .c-conn, .c-hist { grid-column: 1 / -1; }
 @media (max-width: 960px) { .col-l, .col-r { grid-column: 1 / -1; } }
 @media (max-width: 560px) { .col { gap: 12px; } }
-@media (max-width: 560px) { main { padding: 12px; } .grid { gap: 12px; } .card { padding: 14px; border-radius: 14px; } .topbar-in { padding: 8px 12px; } .updated { display: none; } }
+@media (max-width: 560px) { .brand { font-size: 15px; gap: 8px; } .logo { width: 26px; height: 26px; } .topbar-in { gap: 8px; } main { padding: 12px; } .grid { gap: 12px; } .card { padding: 14px; border-radius: 14px; } .topbar-in { padding: 8px 12px; } .updated { display: none; } }
 .muted { color: var(--text-3); }
 .pill { display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border);
   font-size: 12.5px; font-weight: 500; max-width: 100%; min-width: 0; }
