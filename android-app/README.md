@@ -8,6 +8,7 @@ Features:
 - A native status UI, a web dashboard, a REST API and an MCP server (for Claude Code and other MCP clients).
 - Pause with park, retract and reheat; resume restores the exact position and state.
 - Telegram notifications for print done and print error.
+- Optional HTTPS: a self-signed certificate out of the box, or a Let's Encrypt certificate the app obtains and renews itself (DNS-01 through the GoDaddy API). Plain HTTP stays the default.
 - A built-in simulated Marlin (`fake` and `sim-usb` backends) for testing without a printer.
 
 ## Status
@@ -24,6 +25,8 @@ Only tested against the simulator so far:
 - Pause, park and resume on a real print, including pausing during heat-up.
 - Unplug and replug during a print, the USB permission-denied path, and `/api/reset_board`.
 - Doze and battery-optimization behavior on the phone over a long print.
+
+TLS (HTTPS) status: a Let's Encrypt **staging** certificate for `printer.theconsortio.xyz` was issued by the app on the phone and on the emulator, served over HTTPS and verified against the staging root. A **production** certificate has not been issued yet, and no print has run over HTTPS yet.
 
 ## Quick start
 
@@ -43,14 +46,15 @@ Then open `http://<phone-ip>:8080/`. Update with `adb install -r`; never uninsta
 
 ## Docs
 
-- [`docs/USAGE.md`](docs/USAGE.md): install, backends, the safety lock, printing, pause and resume, leveling, Telegram, recovery and testing.
+- [`docs/USAGE.md`](docs/USAGE.md): install, backends, the safety lock, printing, pause and resume, leveling, Telegram, HTTPS and Let's Encrypt, recovery and testing.
 - [`docs/API.md`](docs/API.md): REST and MCP reference with request and response examples.
 - [`docs/DESIGN.md`](docs/DESIGN.md): architecture, the hardware findings behind it, known limitations and the real-hardware test plan.
 
 ## Security notes
 
-- Control endpoints and `/mcp` need an API token over plain HTTP. Use a trusted LAN or Tailscale.
-- Known issue: the service logs the API token at startup, so don't share logcat output.
+- Control endpoints and `/mcp` need an API token. Over plain HTTP the token travels in clear text: use a trusted LAN or Tailscale, or turn on HTTPS ([USAGE.md](docs/USAGE.md#https-tls-and-lets-encrypt)).
+- The service no longer logs the API token, but logcat still shows other operational details, so share it with care.
 - The Telegram bot token and chat ID are entered in the app and are never stored in this repo.
+- GoDaddy API credentials (for Let's Encrypt DNS-01) are stored only on the phone, encrypted with an Android Keystore key, and are never returned by the API or logged. They can change every DNS record of the domain; see the threat model in [DESIGN.md](docs/DESIGN.md#tls-and-acme).
 
 `app/src/main/python/ch340_serial.py` is a copy of the driver in the parent directory. `spike-archive/` holds the early Chaquopy spike code (including DTR-toggling test suites that must never ship). It isn't compiled.

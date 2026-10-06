@@ -60,6 +60,44 @@ Enter the bot token and chat ID in Settings, or `POST /api/config/telegram`, the
 
 For a one-shot setup from the laptop, put `{"telegram_token": "...", "telegram_chat_id": "..."}` in `tools/telegram_config.local.json` (git-ignored) and `adb push` it to `/sdcard/Android/data/<pkg>/files/config.json`. The service applies it on its next start and deletes it.
 
+## HTTPS (TLS) and Let's Encrypt
+
+Plain HTTP on port 8080 is the default (`tls_enabled=false`): no HTTPS listener, no certificate work, no ACME network traffic. Everything below is opt-in and can be switched at runtime from Settings or `POST /api/config`, without restarting the service or disturbing a print.
+
+**1. HTTPS with a self-signed certificate.** Set `tls_enabled: true` and `tls_domain` (the host name clients will use). The app creates a local CA plus a server certificate for that name (and `localhost`) and serves HTTPS on `https_port` (8443). Clients that should verify it download the CA once and trust it:
+
+```bash
+curl -o printer-ca.pem http://<ip>:8080/api/tls/ca.pem
+curl --cacert printer-ca.pem https://<tls_domain>:8443/api/status
+```
+
+Regenerating the self-signed certificate (`POST /api/tls/self_signed`) creates a new CA, so clients must fetch it again.
+
+**2. Let's Encrypt via GoDaddy DNS-01.** The app proves control of `tls_domain` by publishing a temporary `_acme-challenge` TXT record through the GoDaddy API, so the phone needs no inbound internet access. It needs:
+- `tls_domain` (for example `printer.theconsortio.xyz`) inside a GoDaddy-managed domain (`tls_dns_zone`, default: the last two labels);
+- `acme_email` (Let's Encrypt account contact; agreeing to the Let's Encrypt terms is implied);
+- `acme_directory`: `staging` (default, untrusted test certificates) or `production`;
+- the GoDaddy API credentials `KEY:SECRET` (write-only; stored encrypted).
+
+Supply the credentials without printing them, from a file such as an `.env` holding `GODADDY_API_TOKEN=KEY:SECRET`:
+
+```bash
+python3 tools/godaddy_secret.py push --env-file /path/to/.env --base http://<ip>:8080 --token TOKEN
+# prints only: push: HTTP 200, godaddy_credentials_set=True
+```
+
+They can also be typed into Settings (the field is write-only). `POST /api/config {"godaddy_credentials": ""}` deletes them.
+
+Then `POST /api/tls/issue` and poll `GET /api/tls` until `issuance.state` is `succeeded` or `failed`. A run takes about a minute: account, order, TXT record, DNS propagation check (DNS-over-HTTPS), validation, certificate install, TXT cleanup. The new certificate is served at once (the HTTPS listener reloads). Existing TXT records at `_acme-challenge.<host>` are preserved, and the name is restored afterwards, also when issuance fails; `issuance.result.cleanup` reports it. `tools/godaddy_secret.py txt` checks the name read-only.
+
+**Staging first, then production.** Staging certificates are signed by "(STAGING)" intermediates that browsers don't trust; verify them with the [staging root](https://letsencrypt.org/certs/staging/letsencrypt-stg-root-x1.pem) (`curl --cacert letsencrypt-stg-root-x1.pem ...`). When staging looks right, set `acme_directory: production` and issue again (or wait for the scheduler, which treats a directory change as due). Production has strict rate limits; don't loop on failures.
+
+**Renewal.** A scheduler checks 60 s after the service starts and then daily. It renews when the certificate is missing, self-signed, from the other directory, for a different `tls_domain`, or has fewer than 30 days left. It waits while a print job is active and backs off (1 h up to 24 h) after failures. Success and failure are sent to Telegram (no secrets in the messages). Nothing runs while TLS is off or ACME isn't fully configured.
+
+**Listener modes.** `http_enabled: false` makes the app HTTPS-only; `http_bind: "127.0.0.1"` keeps plain HTTP for on-phone use only. Turning off both HTTP and HTTPS is refused (400) and changes nothing.
+
+**Recovery.** If HTTPS is broken (for example a bad keystore), `POST /api/tls/self_signed {"confirm": true}` over HTTP installs a fresh self-signed certificate; `tls_enabled: false` turns HTTPS off. If HTTP is off and HTTPS is unreachable, use adb: `adb forward tcp:8443 tcp:8443` reaches the HTTPS listener on the phone's loopback; the app's data (`files/tls/`) can be cleared by uninstalling only as a last resort (that also wipes the settings and USB permission).
+
 ## Recovering from a halt
 
 If the printer shows KILLED (thermal runaway, an `M85` timeout, an error), power-cycle it. The app reconnects on its own and clears the halted state. The printer's position is unknown after any reboot: home before moving.
@@ -73,4 +111,4 @@ Use the `fake` or `sim-usb` backend and the scripts in `tools/`:
 - `tools/doze_test.sh`: runs a long simulated print with the screen off and deep Doze forced.
 - `tools/phone_smoke.sh`: a read-only (`M115`) smoke test on the real phone; set `PHONE_ADB=<phone-ip>:<adb-port>`.
 
-The instrumented tests (`./gradlew connectedDebugAndroidTest`, needs an emulator or device) cover the driver path, resends, pause/resume, the `M85` timer, the disconnect handling, and that homing, motion, heater and reset commands are refused (with nothing sent) in every active job state. `tools/e2e_fake.py` also checks the REST/MCP refusals and, with headless chromium, that the dashboard's Home and Start buttons are disabled mid-print and while paused and enabled again when idle.
+The instrumented tests (`./gradlew connectedDebugAndroidTest`, needs an emulator or device) cover the driver path, resends, pause/resume, the `M85` timer, the disconnect handling, and that homing, motion, heater and reset commands are refused (with nothing sent) in every active job state. `tools/e2e_tls.py` checks the HTTP/HTTPS listener modes, the self-signed certificate (verified with curl and the MCP SDK), hot reload during a print and the ACME guards. `tools/e2e_fake.py` also checks the REST/MCP refusals and, with headless chromium, that the dashboard's Home and Start buttons are disabled mid-print and while paused and enabled again when idle.

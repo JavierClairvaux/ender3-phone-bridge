@@ -33,6 +33,9 @@ Code is under `app/src/main/java/com/javcabr/printerbridge/` and `app/src/main/p
 | `service/PrinterService.kt` | Owns the controller, HTTP server and notifier; handles USB attach/detach and the permission request; holds the wake and Wi-Fi locks |
 | `server/ApiServer.kt`, `McpHandler.kt` | NanoHTTPD server: dashboard, REST and MCP |
 | `notify/TelegramNotifier.kt` | Bot API `sendMessage` with retries; the token is masked in logs |
+| `service/TlsManager.kt`, `python/tls_tool.py` | Server keystore (PKCS12), self-signed certificates, certificate status, the ACME issuance job and renewal decisions |
+| `python/acme_issue.py` | ACME client (certbot's `acme` library) with DNS-01 through the GoDaddy API |
+| `service/SecretStore.kt` | Android Keystore AES-GCM encryption for secrets |
 
 `ch340_serial.py` is never modified. The Kotlin backend replaces the driver's USB layer by subclassing, so the real driver code runs against Android's USB API.
 
@@ -80,9 +83,26 @@ Modeled on Marlin's `M125`, OctoPrint's `afterPrintPaused`/`beforePrintResumed` 
 
 A pause requested during a resume's reheat returns to `paused` (still parked); a pause during the restore moves runs after they finish. Cancel aborts any pause or resume. Connection loss or a printer halt still ends the job as an error, with no auto-resume.
 
+## TLS and ACME
+
+**Listeners.** Plain HTTP (NanoHTTPD) and, when `tls_enabled`, a second NanoHTTPD instance made secure with an `SSLServerSocketFactory` built from `files/tls/server.p12`. Both serve the same routes and auth. Listener changes run on a dedicated `net-config` thread, never on `printer-io`, so a print is unaffected. A replaced keystore (detected by mtime and size) restarts only the HTTPS listener, which drops in-flight HTTPS connections for a moment. A request that would turn both listeners off is rejected before anything changes.
+
+**Keystore.** Python `cryptography` 42.0.8 writes the PKCS12 with the legacy PBE-SHA1-3DES encoding that Android's PKCS12 KeyStore reads reliably, to a temp file that is atomically renamed. Its random password lives in the secret store. Self-signed mode makes a local CA plus a server certificate (P-256), so strict clients (Python 3.13+ `VERIFY_X509_STRICT`) can verify it; the CA key is discarded.
+
+**ACME.** `acme` 3.1.0 and `josepy` 1.15.0 (certbot's client library; the newest versions compatible with the only Android `cryptography` build for cp313) run under Chaquopy on an `acme-issue` thread. The account key (RSA 2048) is per directory in `files/tls/acme_account_<env>.pem`; each certificate gets a fresh P-256 key. DNS-01: GET the TXT records at `_acme-challenge.<host>`, PUT them back plus the challenge value, poll Google and Cloudflare DNS-over-HTTPS until one sees it (Let's Encrypt queries the authoritative servers itself), answer, finalize, install, hot reload, then restore the previous records (DELETE when there were none) and verify with a GET. The restore runs in a `finally`, so it also happens on failure.
+
+**Issuance during a print is refused, and renewal waits.** The issuance itself is mostly network, but it runs in the same Python interpreter as the printer driver and does CPU-heavy crypto (key generation, signing) on the phone. A GIL hold or CPU spike would delay the one-line-at-a-time streaming and could starve the planner, leaving blobs. With a 30-day renewal margin, waiting costs nothing.
+
+**Threat model.**
+- *The GoDaddy API key can change every DNS record of the domain* (redirect web or mail, issue certificates elsewhere). It lives on a rooted phone. It is stored only as AES-256-GCM ciphertext (`SharedPreferences` "secrets") under a non-exportable Android Keystore key, never returned by the API, never logged, redacted from error messages, progress steps and notifications. This protects against copying the app's files (backups, a pulled data partition, file-level root access). It does **not** protect against an attacker running code as the app or as root on the live phone, who can ask the Keystore to decrypt or read the value from memory while it is used. Limit the blast radius at GoDaddy where possible (a dedicated key, revoked when no longer needed) and keep the phone off the open internet.
+- *The certificate private key and the ACME account key* are in the app's private files (the account key as PEM, the server key inside the PKCS12 whose password is in the secret store). A thief of the files can impersonate the HTTPS endpoint until the certificate expires (90 days) or is revoked, and can request certificates only with DNS control, which also needs the GoDaddy key.
+- *The API token* still travels in every control request; HTTPS protects it in transit. Reads stay unauthenticated by design.
+- *Not covered:* client certificates, HSTS, pinning, and protection of the plain HTTP listener when it is left on.
+
 ## Status of testing
 
 - **Real hardware:** see the [README](../README.md#status) for what has been verified.
+- **TLS:** Let's Encrypt staging issuance for `printer.theconsortio.xyz` ran end to end from the app on the phone (arm64) and on the emulator; the served chain verified against the staging root (curl, openssl, the MCP SDK), and the TXT name was restored to zero records. Production issuance is not done yet.
 - **Simulator and emulator only:** pause/park/reheat/resume sequences and exact state restore; the `M85` disarm paths; pause during a heat wait; resend handling (checksum errors injected into a 405-line job); thermal-runaway and disconnect handling; Doze survival (forced deep idle on an emulator, which doesn't suspend the CPU like a phone does).
 - **Not tested anywhere:** unplug and replug during a print, the USB permission-denied path, `/api/reset_board` on hardware, real-phone Doze with battery management, and sustained full-rate RX.
 
@@ -97,8 +117,10 @@ Do this with the printer watched, using a short part such as a 20 mm cube:
 
 ## Known limitations
 
-Security notes (plain HTTP, token logging) are in the [README](../README.md#security-notes).
+Security notes are in the [README](../README.md#security-notes) and the TLS threat model above.
 
 - A lost connection or app crash mid-print ends the job as an error. There's no resume from a line number. The restarted app doesn't know whether the board's `M85` timer is armed.
 - Cancel can't interrupt an in-flight heat wait.
+- Certificate issuance is refused during a print job; the renewal scheduler waits for it to finish.
+- The self-signed CA changes on every regeneration, so clients must re-download `/api/tls/ca.pem`.
 - Line numbers, checksums and `Resend` handling have only been exercised against the simulator, so the real error wording from Marlin 1.1.6 is unverified.

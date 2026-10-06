@@ -1,6 +1,6 @@
 # API reference
 
-The app serves a dashboard, a REST API and an MCP endpoint on one port (default `8080`) from inside its foreground service. Examples below use `<ip>` for the phone's address and `TOKEN` for the API token.
+The app serves a dashboard, a REST API and an MCP endpoint on plain HTTP (default port `8080`) and, when TLS is enabled, on HTTPS (default port `8443`) with the same routes and auth, from inside its foreground service. Examples below use `<ip>` for the phone's address and `TOKEN` for the API token.
 
 ```bash
 export B=http://<ip>:8080 H="Authorization: Bearer TOKEN"
@@ -10,12 +10,13 @@ curl -X POST -H "$H" $B/api/check_temps                      # everything else d
 
 ## Basics
 
-- **Auth:** `GET` requests (dashboard, status, temps, history, files, log, notifications, config) are open. Every `POST`, `PUT` and `DELETE`, and every `/mcp` call, needs the token as `Authorization: Bearer TOKEN` (also accepted: `X-Api-Token: TOKEN` or `?token=TOKEN`). If the token is cleared in Settings, auth is off. The transport is plain HTTP.
+- **Auth:** `GET` requests (dashboard, status, temps, history, files, log, notifications, config) are open. Every `POST`, `PUT` and `DELETE`, and every `/mcp` call, needs the token as `Authorization: Bearer TOKEN` (also accepted: `X-Api-Token: TOKEN` or `?token=TOKEN`). If the token is cleared in Settings, auth is off. The transport is plain HTTP unless TLS is enabled (see [TLS](#tls)).
 - **Bodies:** JSON in, JSON out (`Content-Type: application/json`, 1 MB limit). File uploads are raw bytes.
 - **Errors:** always `{"error": "<message>", "type": "<ExceptionName>"}` with one of these codes:
 
 | Code | Meaning | Typical cause |
 |---|---|---|
+| 202 | Accepted | `POST /api/tls/issue` started a background issuance |
 | 400 | Bad request | Missing or invalid field, unknown config key |
 | 401 | Unauthorized | Missing or wrong token |
 | 403 | Forbidden | Real-printer safety lock refused the command |
@@ -25,6 +26,7 @@ curl -X POST -H "$H" $B/api/check_temps                      # everything else d
 | 502 | Bad gateway | USB or I/O failure talking to the printer |
 | 500 | Server error | Unexpected; check logcat |
 
+- Error messages never echo a malformed request body and never contain the stored GoDaddy credentials.
 - **Timestamps** are Unix milliseconds. Temperatures are °C, positions mm.
 
 ## Job states
@@ -150,6 +152,15 @@ curl -X POST -H "$H" -H 'Content-Type: application/json' \
 | `pause_extra_purge_mm` | `1.5` | Extra extrusion on resume |
 | `pause_nozzle_standby_s` | `300` | Nozzle turns off this long after parking (0 or less = never) |
 | `real_settle_ms` | `4000` | Post-connect listen/drain window |
+| `http_enabled` | `true` | Plain HTTP listener on/off (can't be off while `tls_enabled` is off: 400, nothing changed) |
+| `http_bind` | `0.0.0.0` | `0.0.0.0` or `127.0.0.1` (plain HTTP on the phone's loopback only) |
+| `tls_enabled` | `false` | HTTPS listener; `false` also means no certificate work and no ACME traffic |
+| `https_port` | `8443` | HTTPS port (always bound to all interfaces) |
+| `tls_domain` | empty | Host name for the certificate (self-signed and ACME) |
+| `tls_dns_zone` | empty | GoDaddy domain holding `tls_domain`; empty = its last two labels |
+| `acme_directory` | `staging` | `staging` or `production` (Let's Encrypt) |
+| `acme_email` | empty | ACME account contact |
+| `godaddy_credentials` | (none) | **Secret, write-only.** `"KEY:SECRET"`; `""` deletes. Stored encrypted; reads only show `godaddy_credentials_set` |
 | `fake_line_delay_ms`, `fake_time_scale`, `fake_inject_resend_every` | `15`, `1`, `0` | Simulator tuning |
 
 ### Telegram
@@ -161,6 +172,33 @@ curl -X POST -H "$H" $B/api/config/telegram/test
 ```
 
 `/api/config/telegram` accepts `telegram_token`, `telegram_chat_id`, `telegram_base_url`, `telegram_enabled` and `notify_on_cancel`, and returns the masked settings (`{"enabled": true, "configured": true, "token": "1234...abcd", "chat_id": "...", ...}`). `GET` returns the same. The test route sends a message and returns its delivery result. Notifications fire on print done and print error, once each.
+
+## TLS
+
+| Route | Auth | Does |
+|---|---|---|
+| `GET /api/tls` | no | Certificate and issuance status (no secrets) |
+| `GET /api/tls/cert.pem` | no | The served certificate chain (public) |
+| `GET /api/tls/ca.pem` | no | Last certificate of the chain: the local CA for self-signed certificates (what clients trust) |
+| `POST /api/tls/issue` | yes | Start a Let's Encrypt issuance in the background; returns `202` and the job; `409` if TLS is off, ACME isn't configured, a print job is active or one is already running |
+| `POST /api/tls/self_signed` | yes | Replace the certificate with a new self-signed one; needs `{"confirm": true}` if the current one came from ACME |
+
+`GET /api/tls`:
+
+```json
+{"enabled": true, "https_port": 8443, "https_running": true, "domain": "printer.theconsortio.xyz",
+ "source": "acme", "acme_directory_setting": "staging", "cert_directory": "staging",
+ "issuer": "(STAGING) Baloney Bulgur YE2 (Let's Encrypt)", "subject": "printer.theconsortio.xyz",
+ "san": ["printer.theconsortio.xyz"], "not_before": "2026-10-06T02:56:11+00:00",
+ "not_after": "2027-01-04T02:56:10+00:00", "days_left": 90.0, "serial": "2cfb...", "sha256": "...",
+ "last_renewal": 1791258885000, "last_error": null, "godaddy_credentials_set": true,
+ "acme_email": "javcabr@gmail.com", "dns_zone": "theconsortio.xyz", "acme_configured": true,
+ "renewal_due": null, "next_check_at": 1791345285000,
+ "issuance": {"state": "succeeded", "trigger": "manual", "steps": ["<ms> TXT record added ...", "..."],
+              "result": {"cert": {...}, "cleanup": {"restored": true, "records_now": 0}, "seconds": 55}}}
+```
+
+`source` is `none`, `self-signed` or `acme`; `issuance.state` is `idle`, `running`, `succeeded` or `failed` (with `error`). `/api/status` carries a short version under `service.tls`, and `service.urls` lists the HTTPS URLs.
 
 ## Simulator controls (fake and sim-usb backends only)
 
