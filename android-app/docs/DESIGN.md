@@ -99,6 +99,10 @@ A pause requested during a resume's reheat returns to `paused` (still parked); a
 - *The API token* still travels in every control request; HTTPS protects it in transit. Reads stay unauthenticated by design.
 - *Not covered:* client certificates, HSTS, pinning, and protection of the plain HTTP listener when it is left on.
 
+## Source restriction
+
+`ApiServer.serve` checks the peer address before authentication and routing, on both listeners, against `restrict_to_tailnet` (100.64.0.0/10) plus `allowed_cidrs`; loopback is always allowed and an empty rule set allows everything (the default). Rules are numeric CIDRs only, parsed without DNS; IPv4-mapped IPv6 peers are matched as IPv4. A change that would exclude the address making it is refused, and adb start extras (`--ez restrict_to_tailnet false`, `--es allowed_cidrs ,`) clear the rules for recovery. This is defense in depth on top of the API token: it keeps LAN neighbours away from the dashboard and API, but anyone already on the tailnet is still let through.
+
 ## Status of testing
 
 - **Real hardware:** see the [README](../README.md#status) for what has been verified.

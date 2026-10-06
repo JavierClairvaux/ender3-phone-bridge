@@ -19,7 +19,7 @@ curl -X POST -H "$H" $B/api/check_temps                      # everything else d
 | 202 | Accepted | `POST /api/tls/issue` started a background issuance |
 | 400 | Bad request | Missing or invalid field, unknown config key |
 | 401 | Unauthorized | Missing or wrong token |
-| 403 | Forbidden | Real-printer safety lock refused the command |
+| 403 | Forbidden | Real-printer safety lock refused the command; or the source address is not allowed (`restrict_to_tailnet`/`allowed_cidrs`, checked before auth on every route) |
 | 404 | Not found | Unknown route; deleting a file that doesn't exist |
 | 405 | Method not allowed | Wrong HTTP verb for the route |
 | 409 | Conflict | Wrong state: job already running, printer halted or not connected, `home` or a motion command during a print |
@@ -160,6 +160,8 @@ curl -X POST -H "$H" -H 'Content-Type: application/json' \
 | `tls_dns_zone` | empty | GoDaddy domain holding `tls_domain`; empty = its last two labels |
 | `acme_directory` | `staging` | `staging` or `production` (Let's Encrypt) |
 | `acme_email` | empty | ACME account contact |
+| `restrict_to_tailnet` | `false` | Accept connections only from 100.64.0.0/10 (plus `allowed_cidrs` and loopback) |
+| `allowed_cidrs` | `[]` | Extra allowed source ranges (list or comma string; numeric CIDRs only, 400 otherwise). With `restrict_to_tailnet` off, a non-empty list restricts to just these. A change that would block the requesting address returns 409 and changes nothing |
 | `godaddy_credentials` | (none) | **Secret, write-only.** `"KEY:SECRET"`; `""` deletes. Stored encrypted; reads only show `godaddy_credentials_set` |
 | `fake_line_delay_ms`, `fake_time_scale`, `fake_inject_resend_every` | `15`, `1`, `0` | Simulator tuning |
 

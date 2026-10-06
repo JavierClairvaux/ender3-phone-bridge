@@ -104,6 +104,29 @@ class AppSettings(context: Context) {
         get() = prefs.getInt("https_port", 8443)
         set(v) { require(v in 1..65535) { "https_port must be 1..65535" }; prefs.edit().putInt("https_port", v).apply() }
 
+    // Source-address restriction (both listeners). Empty + restrict off = allow everything.
+    var allowedCidrs: List<String>
+        get() = (prefs.getString("allowed_cidrs", "") ?: "").split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        set(v) { com.javcabr.printerbridge.server.SourceFilter.validate(v); prefs.edit().putString("allowed_cidrs", v.joinToString(",")).apply() }
+    var restrictToTailnet: Boolean
+        get() = prefs.getBoolean("restrict_to_tailnet", false)
+        set(v) = prefs.edit().putBoolean("restrict_to_tailnet", v).apply()
+
+    /** The CIDRs actually enforced (loopback is always allowed on top); empty = allow all. */
+    fun effectiveCidrs(restrict: Boolean = restrictToTailnet, extra: List<String> = allowedCidrs): List<String> =
+        (if (restrict) listOf(com.javcabr.printerbridge.server.SourceFilter.TAILNET) else emptyList()) + extra
+
+    fun accessJson(): JSONObject = JSONObject().put("restrict_to_tailnet", restrictToTailnet)
+        .put("allowed_cidrs", org.json.JSONArray(allowedCidrs))
+        .put("effective", org.json.JSONArray(effectiveCidrs().let { if (it.isEmpty()) listOf("any") else it + "loopback" }))
+
+    /** Parses allowed_cidrs from a JSON array or a comma-separated string. */
+    fun cidrsFrom(v: Any?): List<String> = when (v) {
+        is org.json.JSONArray -> (0 until v.length()).map { v.getString(it).trim() }.filter { it.isNotEmpty() }
+        is String -> v.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        else -> throw IllegalArgumentException("allowed_cidrs must be a list of CIDRs or a comma-separated string")
+    }.also { com.javcabr.printerbridge.server.SourceFilter.validate(it) }
+
     // ACME (Let's Encrypt, DNS-01 via GoDaddy)
     var tlsDomain: String
         get() = prefs.getString("tls_domain", "") ?: ""
@@ -165,8 +188,11 @@ class AppSettings(context: Context) {
         val newHttp = if (o.has("http_enabled")) o.getBoolean("http_enabled") else httpEnabled
         val newTls = if (o.has("tls_enabled")) o.getBoolean("tls_enabled") else tlsEnabled
         require(newHttp || newTls) { "refusing to turn off both HTTP and HTTPS (the API would become unreachable); nothing was changed" }
+        val newCidrs = if (o.has("allowed_cidrs")) cidrsFrom(o.get("allowed_cidrs")) else null   // validated up front too
         val applied = mutableListOf<String>()
         fun has(k: String) = o.has(k).also { if (it) applied.add(k) }
+        if (newCidrs != null) { applied.add("allowed_cidrs"); allowedCidrs = newCidrs }
+        if (has("restrict_to_tailnet")) restrictToTailnet = o.getBoolean("restrict_to_tailnet")
         if (has("backend")) backend = o.getString("backend")
         if (has("telegram_token")) telegramToken = o.getString("telegram_token")
         if (has("telegram_chat_id")) telegramChatId = o.get("telegram_chat_id").toString()

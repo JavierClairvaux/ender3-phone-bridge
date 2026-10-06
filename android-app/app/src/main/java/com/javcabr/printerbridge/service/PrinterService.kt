@@ -151,6 +151,10 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
             applyRuntimeSettings()
             if (i.getBooleanExtra("disconnect", false)) Thread { runCatching { disconnectPrinter() }.onFailure { Log.w(TAG, "disconnect: $it") } }.start()
             if (i.hasExtra("auto_connect")) settings.autoConnect = i.getBooleanExtra("auto_connect", true)
+            // lock-out recovery over adb: --ez restrict_to_tailnet false / --es allowed_cidrs ""
+            if (i.hasExtra("restrict_to_tailnet")) settings.restrictToTailnet = i.getBooleanExtra("restrict_to_tailnet", false)
+            if (i.hasExtra("allowed_cidrs")) try { settings.allowedCidrs = settings.cidrsFrom(i.getStringExtra("allowed_cidrs") ?: "") }
+                catch (e: IllegalArgumentException) { Log.w(TAG, "ignored allowed_cidrs extra: ${e.message}") }
             if (i.getBooleanExtra("connect", false)) { firstStart = false; connectAsync() }
         }
         // Initial auto-connect happens here (not in onCreate) so start extras apply first.
@@ -244,6 +248,7 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
             .put("http_port", port).put("http_enabled", settings.httpEnabled).put("http_bind", settings.httpBind)
             .put("http_running", httpServer != null).put("http_error", httpError ?: JSONObject.NULL)
             .put("tls", tls.shortJson(httpsServer != null))
+            .put("access", settings.accessJson())
             .put("urls", JSONArray(urls))
             .put("wake_lock_held", wakeLock?.isHeld == true).put("wifi_lock_held", wifiLock?.isHeld == true)
             .put("device_idle_mode", pm.isDeviceIdleMode).put("interactive", pm.isInteractive)

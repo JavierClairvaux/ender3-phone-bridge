@@ -46,8 +46,18 @@ class ApiServer(private val context: Context, bindHost: String, port: Int, priva
                 val secure: Boolean = false) : NanoHTTPD(bindHost, port) {
     private val mcp = McpHandler { host.controller }
 
+    @Volatile private var filterCache: Pair<List<String>, SourceFilter>? = null
+    private fun filter(): SourceFilter {
+        val want = host.settings.effectiveCidrs()
+        filterCache?.let { if (it.first == want) return it.second }
+        return SourceFilter(want).also { filterCache = want to it }
+    }
+
     override fun serve(s: IHTTPSession): Response {
         val path = s.uri.trimEnd('/').ifEmpty { "/" }
+        // Source restriction first: before auth and routing, for every route (dashboard and /mcp too).
+        val remote = s.remoteIpAddress
+        if (!filter().allows(remote)) return json(403, JSONObject().put("error", "source address $remote is not allowed (restrict_to_tailnet / allowed_cidrs)"))
         return try {
             val needsAuth = s.method != Method.GET || path == "/mcp"
             if (needsAuth && !authorized(s)) return json(401, JSONObject().put("error", "missing or wrong API token"))
@@ -151,7 +161,19 @@ class ApiServer(private val context: Context, bindHost: String, port: Int, priva
             path == "/api/tls/issue" && m == Method.POST -> json(202, host.tlsIssue())
             path == "/api/tls/self_signed" && m == Method.POST -> json(200, host.tlsSelfSigned(jbody(s).optBoolean("confirm")))
             path == "/api/config" && m == Method.GET -> json(200, configJson())
-            path == "/api/config" -> { val applied = host.settings.apply(jbody(s)); host.applyRuntimeSettings(); json(200, configJson().put("applied", applied)) }
+            path == "/api/config" -> {
+                val b = jbody(s)
+                if (b.has("restrict_to_tailnet") || b.has("allowed_cidrs")) {
+                    // refuse a change that would lock out the address making it (no change made)
+                    val st = host.settings
+                    val prospective = SourceFilter(st.effectiveCidrs(
+                        if (b.has("restrict_to_tailnet")) b.getBoolean("restrict_to_tailnet") else st.restrictToTailnet,
+                        if (b.has("allowed_cidrs")) st.cidrsFrom(b.get("allowed_cidrs")) else st.allowedCidrs))
+                    if (!prospective.allows(s.remoteIpAddress))
+                        throw IllegalStateException("refused: this change would block your own address ${s.remoteIpAddress}; nothing was changed")
+                }
+                val applied = host.settings.apply(b); host.applyRuntimeSettings(); json(200, configJson().put("applied", applied))
+            }
             path == "/api/sim/error" -> json(200, host.simulateError(jbody(s).optString("kind", "thermal_runaway")))
             path == "/api/sim/config" -> {
                 val b = jbody(s)
@@ -176,6 +198,7 @@ class ApiServer(private val context: Context, bindHost: String, port: Int, priva
             .put("api_token_set", st.apiToken.isNotEmpty())
             .put("pause", st.pauseJson())
             .put("tls", st.tlsJson())
+            .put("access", st.accessJson())
     }
 
     private fun contentLength(s: IHTTPSession): Long = s.headers["content-length"]?.toLongOrNull() ?: 0L

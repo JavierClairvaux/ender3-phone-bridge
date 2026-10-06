@@ -98,6 +98,21 @@ Then `POST /api/tls/issue` and poll `GET /api/tls` until `issuance.state` is `su
 
 **Recovery.** If HTTPS is broken (for example a bad keystore), `POST /api/tls/self_signed {"confirm": true}` over HTTP installs a fresh self-signed certificate; `tls_enabled: false` turns HTTPS off. If HTTP is off and HTTPS is unreachable, use adb: `adb forward tcp:8443 tcp:8443` reaches the HTTPS listener on the phone's loopback; the app's data (`files/tls/`) can be cleared by uninstalling only as a last resort (that also wipes the settings and USB permission).
 
+## Restricting who can connect
+
+By default any address that can reach the phone can talk to the API (control still needs the token). To accept only tailnet clients, set `restrict_to_tailnet: true`: connections from outside 100.64.0.0/10 (the Tailscale/headscale range) get 403 on both listeners, for every route including the dashboard and `/mcp`, before authentication. `allowed_cidrs` (a list such as `["192.168.1.0/24"]`) adds more ranges, or on its own restricts to just those. Loopback is always allowed. The active rule shows in `/api/status` under `service.access`.
+
+With the restriction on, the phone's Wi-Fi LAN address stops answering for LAN clients, while its tailnet address (100.64.x.x) keeps working.
+
+A change that would block the address making it is refused (409) and changes nothing. If a restriction still locks you out, clear it over adb:
+
+```bash
+adb shell am start-foreground-service -n <pkg>/com.javcabr.printerbridge.service.PrinterService --ez restrict_to_tailnet false
+adb shell am start-foreground-service -n <pkg>/com.javcabr.printerbridge.service.PrinterService --es allowed_cidrs ,
+```
+
+`adb forward tcp:8080 tcp:8080` also reaches the API on the phone's loopback, which is always allowed.
+
 ## Recovering from a halt
 
 If the printer shows KILLED (thermal runaway, an `M85` timeout, an error), power-cycle it. The app reconnects on its own and clears the halted state. The printer's position is unknown after any reboot: home before moving.
@@ -111,4 +126,4 @@ Use the `fake` or `sim-usb` backend and the scripts in `tools/`:
 - `tools/doze_test.sh`: runs a long simulated print with the screen off and deep Doze forced.
 - `tools/phone_smoke.sh`: a read-only (`M115`) smoke test on the real phone; set `PHONE_ADB=<phone-ip>:<adb-port>`.
 
-The instrumented tests (`./gradlew connectedDebugAndroidTest`, needs an emulator or device) cover the driver path, resends, pause/resume, the `M85` timer, the disconnect handling, and that homing, motion, heater and reset commands are refused (with nothing sent) in every active job state. `tools/e2e_tls.py` checks the HTTP/HTTPS listener modes, the self-signed certificate (verified with curl and the MCP SDK), hot reload during a print and the ACME guards. `tools/e2e_fake.py` also checks the REST/MCP refusals and, with headless chromium, that the dashboard's Home and Start buttons are disabled mid-print and while paused and enabled again when idle.
+The instrumented tests (`./gradlew connectedDebugAndroidTest`, needs an emulator or device) cover the driver path, resends, pause/resume, the `M85` timer, the disconnect handling, and that homing, motion, heater and reset commands are refused (with nothing sent) in every active job state. `tools/e2e_access.py` checks the source restriction (403 vs 200 on both listeners and `/mcp`, the lock-out guard and the adb escape hatch). `tools/e2e_tls.py` checks the HTTP/HTTPS listener modes, the self-signed certificate (verified with curl and the MCP SDK), hot reload during a print and the ACME guards. `tools/e2e_fake.py` also checks the REST/MCP refusals and, with headless chromium, that the dashboard's Home and Start buttons are disabled mid-print and while paused and enabled again when idle.
