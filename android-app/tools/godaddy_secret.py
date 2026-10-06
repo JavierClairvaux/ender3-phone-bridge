@@ -59,7 +59,7 @@ def txt(a, creds):
 def scan(a, creds):
     total = 0
     for label, needle in (("full", creds), ("key part", creds.split(":", 1)[0]), ("secret part", creds.split(":", 1)[1])):
-        r = subprocess.run(["grep", "-rFc", "--binary-files=text", "--", needle] + a.paths, capture_output=True, text=True)
+        r = subprocess.run(["grep", "-rFcH", "--binary-files=text", "--", needle] + a.paths, capture_output=True, text=True)
         n = sum(int(line.rsplit(":", 1)[1]) for line in r.stdout.splitlines() if line.rsplit(":", 1)[-1].isdigit())
         total += n
         print("scan %-11s: %d occurrence(s)" % (label, n))
