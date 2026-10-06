@@ -94,4 +94,44 @@ class TlsInstrumentedTest {
         assertEquals("self-signed", tls.source())
         Log.i(TAG, "PASS self-signed cert over HTTPS verified against its CA; swap $s1 -> $s2")
     }
+
+    @Test
+    fun acmeGuards_andRenewalDecisions_withoutNetwork() {
+        val st = AppSettings(ctx)
+        val secrets = st.secrets
+        // save and restore whatever is configured (the emulator may hold real credentials; never printed)
+        val saved = listOf(st.tlsEnabled, st.tlsDomain, st.acmeEmail, st.acmeDirectory)
+        val savedCreds = secrets.get(SecretStore.GODADDY)
+        val tls = TlsManager(ctx, st, secrets)
+        val savedP12 = if (tls.p12.isFile) tls.p12.readBytes() else null
+        val savedMeta = tls.meta().toString()
+        try {
+            st.tlsEnabled = false
+            assertNull("no renewal activity while TLS is off", tls.renewalReason())
+            try { tls.issueAsync("test", false) { _, _ -> }; fail("issued with TLS off") } catch (e: IllegalStateException) { assertTrue(e.message!!.contains("TLS is disabled")) }
+            st.tlsEnabled = true; st.tlsDomain = "printer.example.test"; st.acmeEmail = "ops@example.test"; st.acmeDirectory = "staging"
+            secrets.remove(SecretStore.GODADDY)
+            assertNull("not configured without credentials", tls.renewalReason())
+            try { tls.issueAsync("test", false) { _, _ -> }; fail("issued without credentials") } catch (e: IllegalStateException) { assertTrue(e.message!!.contains("GoDaddy credentials")) }
+            secrets.put(SecretStore.GODADDY, "TESTKEY_abcdef:TESTSECRET_ghijkl")
+            try { tls.issueAsync("test", true) { _, _ -> }; fail("issued during a print") } catch (e: IllegalStateException) { assertTrue(e.message!!.contains("print job is active")) }
+            tls.makeSelfSigned()
+            assertEquals("self-signed certificate", tls.renewalReason())
+            tls.updateMeta { it.put("source", "acme").put("directory", "staging") }
+            assertNull("fresh matching cert: nothing due", tls.renewalReason())
+            st.acmeDirectory = "production"
+            assertTrue(tls.renewalReason()!!.startsWith("ACME directory changed"))
+            st.acmeDirectory = "staging"; st.tlsDomain = "other.example.test"
+            assertEquals("tls_domain changed", tls.renewalReason())
+            // redaction removes the credentials and both halves
+            val r = tls.redact("x TESTKEY_abcdef:TESTSECRET_ghijkl y TESTSECRET_ghijkl z TESTKEY_abcdef")
+            assertFalse(r.contains("TESTKEY") || r.contains("TESTSECRET"))
+            Log.i(TAG, "PASS ACME guards (TLS off, no credentials, print active) and renewal decisions; redaction")
+        } finally {
+            st.tlsEnabled = saved[0] as Boolean; st.tlsDomain = saved[1] as String; st.acmeEmail = saved[2] as String; st.acmeDirectory = saved[3] as String
+            if (savedCreds != null) secrets.put(SecretStore.GODADDY, savedCreds) else secrets.remove(SecretStore.GODADDY)
+            if (savedP12 != null) tls.p12.writeBytes(savedP12)
+            tls.updateMeta { m -> val o = JSONObject(savedMeta); m.keys().asSequence().toList().forEach { m.remove(it) }; o.keys().forEach { k -> m.put(k, o.get(k)) } }
+        }
+    }
 }

@@ -16,6 +16,9 @@ import javax.net.ssl.SSLServerSocketFactory
  * history; no secrets). Certificate parsing/creation runs in Python
  * (tls_tool.py, `cryptography`).
  */
+/** Python calls progress.step(msg) during issuance (messages are secret-free; redacted anyway). */
+interface AcmeProgress { fun step(msg: String) }
+
 class TlsManager(private val context: Context, private val settings: AppSettings, private val secrets: SecretStore) {
     val dir = File(context.filesDir, "tls").apply { mkdirs() }
     val p12 = File(dir, "server.p12")
@@ -85,6 +88,93 @@ class TlsManager(private val context: Context, private val settings: AppSettings
 
     fun source(): String = if (!hasCert()) "none" else meta().optString("source", "unknown")
 
+    // ------------------------------------------------------------------ ACME issuance
+
+    private val jobLock = Any()
+    @Volatile private var job: JSONObject = JSONObject().put("state", "idle")
+
+    fun jobJson(): JSONObject = synchronized(jobLock) { JSONObject(job.toString()) }
+    fun issuing(): Boolean = synchronized(jobLock) { job.optString("state") == "running" }
+
+    /** Replace the GoDaddy credentials (and their halves) in any text before it is stored, logged or sent. */
+    fun redact(t: String?): String {
+        if (t == null) return ""
+        val sec = try { secrets.get(SecretStore.GODADDY) } catch (e: Exception) { null } ?: return t
+        var out: String = t
+        for (part in listOf(sec) + sec.split(':').filter { it.length >= 6 }) out = out.replace(part, "<redacted>")
+        return out
+    }
+
+    /** Why a (re)issuance is due, or null. Never anything while TLS is disabled or ACME isn't configured. */
+    fun renewalReason(): String? {
+        if (!settings.tlsEnabled || !acmeConfigured()) return null
+        if (!hasCert()) return "no certificate"
+        val m = meta()
+        if (m.optString("source") != "acme") return "self-signed certificate"
+        if (m.optString("directory") != settings.acmeDirectory) return "ACME directory changed to ${settings.acmeDirectory}"
+        val info = certInfo() ?: return "certificate unreadable"
+        if (info.optString("subject_cn") != settings.tlsDomain) return "tls_domain changed"
+        val days = info.optDouble("days_left", 0.0)
+        if (days < RENEW_DAYS) return "expires in ${"%.1f".format(days)} days"
+        return null
+    }
+
+    fun acmeConfigured() = settings.tlsDomain.isNotEmpty() && settings.acmeEmail.isNotEmpty() && secrets.has(SecretStore.GODADDY)
+
+    /**
+     * Starts an issuance on a background thread and returns the job status immediately.
+     * [onDone] runs on that thread with (success, message). Throws IllegalStateException
+     * (HTTP 409) if TLS is off, ACME isn't configured, a print job is active, or one is running.
+     */
+    fun issueAsync(trigger: String, printJobActive: Boolean, onDone: (Boolean, String) -> Unit): JSONObject {
+        check(settings.tlsEnabled) { "TLS is disabled (tls_enabled=false): enable it before issuing a certificate" }
+        check(settings.tlsDomain.isNotEmpty()) { "tls_domain is not set" }
+        check(settings.acmeEmail.isNotEmpty()) { "acme_email is not set" }
+        check(secrets.has(SecretStore.GODADDY)) { "GoDaddy credentials are not set" }
+        check(!printJobActive) { "a print job is active: certificate issuance waits until it is finished (it shares the Python runtime and CPU with the printer link)" }
+        val creds = secrets.get(SecretStore.GODADDY)!!
+        val env = settings.acmeDirectory; val domain = settings.tlsDomain; val email = settings.acmeEmail; val zone = settings.effectiveZone()
+        synchronized(jobLock) {
+            check(job.optString("state") != "running") { "an issuance is already running" }
+            job = JSONObject().put("state", "running").put("trigger", trigger).put("directory", env).put("domain", domain)
+                .put("started_at", System.currentTimeMillis()).put("steps", org.json.JSONArray())
+        }
+        val progress = object : AcmeProgress {
+            override fun step(msg: String) {
+                val m = redact(msg)
+                Log.i(TAG, "acme: $m")
+                synchronized(jobLock) { job.getJSONArray("steps").put("${System.currentTimeMillis()} $m") }
+            }
+        }
+        Thread({
+            var ok = false; var msg: String
+            try {
+                progress.step("starting ($trigger) for $domain via $env, DNS zone $zone")
+                val res = JSONObject(RealPrinterConnection.py(context).getModule("acme_issue")
+                    .callAttr("issue", dir.path, env, email, domain, zone, creds, p12.path, password(), progress).toString())
+                infoCache = null
+                val cert = res.getJSONObject("cert"); val cleanup = res.getJSONObject("cleanup")
+                updateMeta {
+                    it.put("source", "acme").put("directory", env).put("last_renewal", System.currentTimeMillis())
+                        .put("installed_at", System.currentTimeMillis()).put("last_error", JSONObject.NULL)
+                        .put("last_cleanup", cleanup)
+                }
+                ok = true
+                msg = "certificate for $domain from Let's Encrypt ${env} (issuer ${cert.optString("issuer_cn")}), expires ${cert.optString("not_after")}" +
+                    (if (cleanup.optBoolean("restored", true)) "" else "; WARNING: TXT cleanup did not verify")
+                synchronized(jobLock) { job.put("state", "succeeded").put("result", JSONObject().put("cert", cert).put("cleanup", cleanup).put("seconds", res.opt("seconds"))) }
+            } catch (t: Throwable) {
+                msg = redact("${t.javaClass.simpleName}: ${t.message}").take(600)
+                updateMeta { it.put("last_error", msg).put("last_error_at", System.currentTimeMillis()) }
+                synchronized(jobLock) { job.put("state", "failed").put("error", msg) }
+                Log.e(TAG, "acme issuance failed: $msg")
+            }
+            synchronized(jobLock) { job.put("finished_at", System.currentTimeMillis()) }
+            try { onDone(ok, msg) } catch (t: Throwable) { Log.e(TAG, "onDone: ${t.javaClass.simpleName}") }
+        }, "acme-issue").apply { isDaemon = true; priority = Thread.MIN_PRIORITY; start() }
+        return jobJson()
+    }
+
     fun statusJson(httpsRunning: Boolean, httpsError: String?): JSONObject {
         val m = meta()
         val info = certInfo()
@@ -105,6 +195,12 @@ class TlsManager(private val context: Context, private val settings: AppSettings
             .put("chain_issuers", info?.optJSONArray("chain_issuers") ?: JSONObject.NULL)
             .put("last_renewal", n(m.opt("last_renewal"))).put("last_error", n(m.opt("last_error")))
             .put("godaddy_credentials_set", secrets.has(SecretStore.GODADDY))
+            .put("acme_email", settings.acmeEmail.ifEmpty { null } ?: JSONObject.NULL)
+            .put("dns_zone", settings.effectiveZone().ifEmpty { null } ?: JSONObject.NULL)
+            .put("acme_configured", acmeConfigured())
+            .put("renewal_due", renewalReason() ?: JSONObject.NULL)
+            .put("next_check_at", n(m.opt("next_check_at")))
+            .put("issuance", jobJson())
     }
 
     /** Short form for /api/status.service. */
@@ -117,5 +213,8 @@ class TlsManager(private val context: Context, private val settings: AppSettings
             .put("days_left", info?.optDouble("days_left") ?: JSONObject.NULL)
     }
 
-    companion object { const val TAG = "PrinterBridge.tls" }
+    companion object {
+        const val TAG = "PrinterBridge.tls"
+        const val RENEW_DAYS = 30.0
+    }
 }

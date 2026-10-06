@@ -214,6 +214,22 @@ def main():
     code, _, _ = curl("/api/status")
     check("tls_on_again_same_cert", code == 200, code)
 
+    # ---- H: ACME issuance guards (no network needed: refused before anything starts)
+    rest(args.http, "POST", "/api/sim/config", {"line_delay_ms": 40, "time_scale": 5})
+    rest(args.http, "POST", "/api/print", {"file": args.file})
+    wait(lambda: (rest(args.http, "GET", "/api/status", auth=False)[1].get("job") or {}).get("state") == "printing", 60, "printing H")
+    c, b = rest(args.http, "POST", "/api/tls/issue")
+    check("acme_issue_refused_during_print_or_unconfigured", c == 409 and ("print job is active" in b.get("error", "") or "not set" in b.get("error", "")), (c, b.get("error")))
+    rest(args.http, "POST", "/api/cancel")
+    wait(lambda: rest(args.http, "GET", "/api/status", auth=False)[1]["job"]["state"] == "cancelled", 60, "cancelled H")
+    set_cfg("http", {"tls_enabled": False})
+    time.sleep(2)
+    c, b = rest(args.http, "POST", "/api/tls/issue")
+    _, tls = rest(args.http, "GET", "/api/tls", auth=False)
+    check("acme_issue_refused_with_tls_off_no_renewal_due", c == 409 and "TLS is disabled" in b.get("error", "") and tls["renewal_due"] is None, (c, b.get("error")))
+    set_cfg("http", {"tls_enabled": True})
+    wait(https_up, 30, "https up (end)")
+
     with open(args.out + "_results.json", "w") as f:
         json.dump(results, f, indent=1)
     print("\n%d/%d checks passed" % (sum(r["pass"] for r in results), len(results)))

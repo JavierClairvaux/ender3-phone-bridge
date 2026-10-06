@@ -65,6 +65,10 @@ chaquopy {
         pip {
             // TLS (self-signed cert, PKCS12). 42.0.8 is the newest Android cp313 build on Chaquopy's index.
             install("cryptography==42.0.8")
+            // ACME client (certbot's library). acme/certbot 4+ need cryptography >= 43; these are the
+            // newest versions compatible with 42.0.8.
+            install("acme==3.1.0")
+            install("josepy==1.15.0")
         }
     }
 }

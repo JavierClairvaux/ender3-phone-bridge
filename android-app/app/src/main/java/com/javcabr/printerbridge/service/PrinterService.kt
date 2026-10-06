@@ -130,6 +130,7 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
         controller = PrinterController(File(filesDir, "history.json"), File(filesDir, "gcode").apply { mkdirs() }, this, settings.controllerSettings())
         applyRuntimeSettings()
         reconfigureServers("start")
+        Thread(::renewalLoop, "tls-renewal").apply { isDaemon = true; priority = Thread.MIN_PRIORITY; start() }
         val f = IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED); addAction(UsbManager.ACTION_USB_DEVICE_DETACHED); addAction(ACTION_USB_PERMISSION)
         }
@@ -332,7 +333,46 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
         return tlsStatus()
     }
 
-    override fun tlsIssue(): JSONObject = throw IllegalStateException("ACME issuance is not available in this build")
+    private fun printJobActive() = controller.currentJobState in setOf("queued", "printing", "pausing", "paused", "resuming")
+
+    override fun tlsIssue(): JSONObject = startIssuance("manual")
+
+    private fun startIssuance(trigger: String): JSONObject = tls.issueAsync(trigger, printJobActive()) { ok, msg ->
+        if (ok) {
+            reconfigureServers("ACME certificate installed")
+            telegram.notify("tls_renewed", "[Printer Bridge] TLS $msg")
+        } else {
+            telegram.notify("tls_failed", "[Printer Bridge] TLS certificate issuance/renewal FAILED for ${settings.tlsDomain}: $msg")
+        }
+        synchronized(renewLock) { renewLock.notifyAll() }
+    }
+
+    /**
+     * Renewal scheduler: checks 60 s after start and then every 24 h; renews when the cert is
+     * missing/self-signed/staging-vs-production mismatch/for another domain/< 30 days left.
+     * Does nothing while TLS is off or ACME isn't configured. Defers (30 min) while a print job
+     * is active. Failures back off 1 h, 2 h, 4 h ... 24 h.
+     */
+    private val renewLock = Object()
+    private fun renewalLoop() {
+        var wait = 60_000L
+        var backoff = 3_600_000L
+        while (!netExec.isShutdown) {
+            tls.updateMeta { it.put("next_check_at", System.currentTimeMillis() + wait) }
+            synchronized(renewLock) { renewLock.wait(wait) }
+            if (netExec.isShutdown) return
+            val reason = try { tls.renewalReason() } catch (e: Exception) { null }
+            if (reason == null || tls.issuing()) { wait = DAY_MS; continue }
+            if (printJobActive()) { Log.i(TAG, "certificate renewal due ($reason) but a print job is active: retry in 30 min"); wait = 30 * 60_000L; continue }
+            Log.i(TAG, "certificate renewal due: $reason")
+            try {
+                startIssuance("scheduled: $reason")
+                while (tls.issuing()) synchronized(renewLock) { renewLock.wait(5_000) }
+            } catch (e: Exception) { Log.w(TAG, "scheduled issuance not started: ${tls.redact(e.message)}") }
+            if (tls.jobJson().optString("state") == "succeeded") { wait = DAY_MS; backoff = 3_600_000L }
+            else { wait = backoff; backoff = minOf(backoff * 2, DAY_MS) }
+        }
+    }
 
     override fun tlsChainPem(): String? = if (tls.hasCert()) tls.chainPem() else null
     override fun tlsCaPem(): String? = if (tls.hasCert()) tls.caPem() else null
@@ -405,6 +445,7 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
         const val TAG = "PrinterBridge.svc"
         const val CHANNEL = "printer"
         const val NOTIF_ID = 1
+        const val DAY_MS = 24 * 3_600_000L
         const val ACTION_USB_PERMISSION = "com.javcabr.printerbridge.USB_PERMISSION"
         @Volatile var instance: PrinterService? = null
 
