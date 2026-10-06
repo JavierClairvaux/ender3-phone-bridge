@@ -26,7 +26,7 @@ Only tested against the simulator so far:
 - Unplug and replug during a print, the USB permission-denied path, and `/api/reset_board`.
 - Doze and battery-optimization behavior on the phone over a long print.
 
-TLS (HTTPS) status: a Let's Encrypt **staging** certificate for `printer.theconsortio.xyz` was issued by the app on the phone and on the emulator, served over HTTPS and verified against the staging root. A **production** certificate has not been issued yet, and no print has run over HTTPS yet.
+TLS (HTTPS) status: the app obtained a production Let's Encrypt certificate for `printer.theconsortio.xyz` on the phone (DNS-01 through GoDaddy) and serves it over HTTPS, verified with the system trust store (REST and MCP). Staging was verified first. No print has run over HTTPS yet.
 
 ## Quick start
 
