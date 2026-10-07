@@ -226,11 +226,17 @@ const qs = new URLSearchParams(location.search);
 let token = qs.get("token") || "";
 try { token = token || localStorage.getItem("pb_token") || ""; } catch (e) {}
 $("tok").value = token;
-$("tok").addEventListener("change", () => { token = $("tok").value.trim(); try { localStorage.setItem("pb_token", token); } catch (e) {} });
+// Read the field itself at request time: "change" only fires when it loses focus, so a token that was
+// typed or auto-filled but not yet blurred (common on phones) used to be ignored.
+const curToken = () => ($("tok").value || "").trim() || token;
+const saveToken = () => { token = curToken(); try { localStorage.setItem("pb_token", token); } catch (e) {} };
+["input", "change", "blur"].forEach(ev => $("tok").addEventListener(ev, saveToken));
 
 async function api(path, opts = {}) {
   const headers = Object.assign({}, opts.headers || {});
-  if (token) headers["Authorization"] = "Bearer " + token;
+  const tk = curToken();
+  if (tk) headers["Authorization"] = "Bearer " + tk;
+  else if ((opts.method || "GET") !== "GET") throw new Error("enter the API token first");
   const r = await fetch(path, Object.assign({}, opts, { headers }));
   const txt = await r.text();
   let body; try { body = JSON.parse(txt); } catch (e) { body = { raw: txt }; }
