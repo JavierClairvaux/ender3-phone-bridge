@@ -20,7 +20,7 @@ import org.json.JSONObject
 /**
  * Minimal native UI: connection + print state from the foreground service,
  * plus connect/disconnect, backend switch, pause/resume/cancel and settings.
- * Also the target of USB_DEVICE_ATTACHED for the CH340.
+ * Also the target of USB_DEVICE_ATTACHED for the boards listed in res/xml/device_filter.xml (CH340, STM32 CDC).
  */
 class MainActivity : Activity() {
     private lateinit var status: TextView

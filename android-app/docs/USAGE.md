@@ -18,11 +18,21 @@ Start the foreground service from adb with `am start-foreground-service -n <pkg>
 
 | Backend | What it is |
 |---|---|
-| `real` | The printer, over USB through the unmodified driver |
+| `real` | The printer, over USB. The board is detected from its USB ids: a CH340 (stock Ender 3 board) goes through the unmodified Python driver, a CDC-ACM board (SKR Mini E3 V3.0, `0483:5740`) goes through the native CDC connection. See "Board detection" below |
 | `fake` | A built-in simulated Marlin: temperature ramps, position, resends, thermal-runaway and disconnect errors. Safe for testing everything |
-| `sim-usb` | The full real Chaquopy and driver path over a simulated CH340 |
+| `sim-usb` | The full real Chaquopy and driver path over a simulated CH340 (a Marlin 1.1.6 board) |
+| `sim-cdc` | The native CDC path over a simulated SKR Mini E3 V3.0 (Marlin 2, a port that stays silent until DTR is raised) |
 
 Switch with the Backend button in the app or `POST /api/connection {"backend": "fake"}`.
+
+### Board detection
+
+Detection has two layers, and both show up in `GET /api/connection` (and `usb_detected` in the service info of `/api/status`).
+
+1. **USB ids** (`usb/UsbCatalog.kt`, mirrored in `res/xml/device_filter.xml`): `1a86:7523` is the CH340 of the stock board, `0483:5740` is the SKR Mini E3 V3.0's native USB. Any other device that has a CDC communications interface plus a data interface is used as a generic CDC-ACM serial device. A known id wins over the generic fallback.
+2. **The board's own answer to `M115`** (`printer/BoardInfo.kt`), sent once on connect: firmware name and version, machine type, UUID and every `Cap:` line. `connection.board` reports `family` (`marlin-1.1`, `marlin-2.x`, `marlin`, `unknown`) and the capabilities that matter (`emergency_parser`, `eeprom`, `autolevel`, `z_probe`, `thermal_protection`, `sd_card`). This identifies the firmware regardless of how it is attached.
+
+The SKR profile raises DTR and RTS after opening the port (a native-USB Marlin only talks to a host that has opened it), which does not reset that board. The generic CDC profile never raises them, because an Arduino-style USB-serial bridge reboots its board on a DTR edge. `/api/reset_board` is not available on a native-USB board. Plugging in a listed board starts the app's auto-connect, as for the CH340.
 
 ## Safety lock
 

@@ -17,3 +17,15 @@ interface UsbIo {
     fun bulkWrite(data: ByteArray, timeoutMs: Int): Int
     fun close()
 }
+
+/**
+ * Class-specific requests of a CDC-ACM serial port (native-USB boards such as the
+ * SKR Mini E3 V3.0). Implemented next to [UsbIo] by [AndroidUsbIo] and [SimCdcUsbIo].
+ * Both only configure the port; neither can reset a native-USB Marlin board.
+ */
+interface CdcControl {
+    /** SET_LINE_CODING, 8N1. Returns true on success. */
+    fun setLineCoding(baud: Int): Boolean
+    /** SET_CONTROL_LINE_STATE. Returns true on success. */
+    fun setControlLines(dtr: Boolean, rts: Boolean): Boolean
+}

@@ -46,7 +46,8 @@ Everything at once.
 ```json
 {
   "connection": {"state": "connected", "backend": "real", "error": null, "firmware": "Marlin Creality 3D",
-                 "machine_type": "Ender-3", "halted": false, "lines_sent_total": 10, "last_rx": "ok", "details": {}},
+                 "machine_type": "Ender-3", "board": {"family": "marlin-1.1", "version": "1.1.6.2", "emergency_parser": false, "...": "..."},
+                 "halted": false, "lines_sent_total": 10, "last_rx": "ok", "details": {}},
   "temps":    {"hotend": 200.1, "hotend_target": 200, "bed": 60.5, "bed_target": 60, "updated_at": 1791052861640},
   "position": {"known": true, "x": 111.5, "y": 123.2, "z": 1.4, "e": 0, "updated_at": 1791052983687},
   "job": {"id": "576c3e4c", "file": "part.gcode", "state": "printing", "progress_pct": 3.1,
@@ -60,7 +61,7 @@ Everything at once.
 ```
 
 - `job` is `null` before the first job. `position.known` is false until the printer has been homed on this connection.
-- `connection.state`: `connected`, `connecting`, `error` or `disconnected` (before the first connect and after a disconnect) (with `error` text, for example `CH340 (1a86:7523) not attached`). `halted: true` means Marlin killed itself and needs a power-cycle.
+- `connection.state`: `connected`, `connecting`, `error` or `disconnected` (before the first connect and after a disconnect) (with `error` text, for example `no supported printer board attached (looking for a CH340 ... or a CDC-ACM board ...)`). `connection.board` is read from the board's `M115` reply on connect: `firmware`, `version`, `family` (`marlin-1.1`, `marlin-2.x`, `marlin`, `unknown`), `machine_type`, `uuid`, the flags `emergency_parser`, `eeprom`, `autolevel`, `z_probe`, `thermal_protection`, `sd_card`, `kind` (`marlin`, `klipper`, `repetier`, `prusa`, `reprapfirmware`, `malyan`, `unknown`) with a `warning` when it is not Marlin, and the full `capabilities` map; it is `null` until connected. `connection.details.transport` is `cdc-acm` for a native-USB board. `halted: true` means Marlin killed itself and needs a power-cycle.
 - `remaining_source` is `slicer_m73` (from the slicer's `M73 R` lines), `linear_estimate` or `none`.
 - While paused, `job.pause` holds `stage`, `parked`, `park_skipped` (reason), `retracted_mm`, `nozzle_cooled`, `nozzle_standby_in_s`, `reheated` and the `saved` position, targets, fan and feedrate.
 
@@ -128,7 +129,7 @@ curl -X POST -H "$H" -H 'Content-Type: application/json' \
   -d '{"action": "connect", "backend": "fake"}' $B/api/connection
 ```
 
-- `action`: `connect` (default) or `disconnect`. `backend` is optional: `real`, `fake` or `sim-usb`; it switches backends (and saves the choice).
+- `action`: `connect` (default) or `disconnect`. `backend` is optional: `real`, `fake`, `sim-usb` or `sim-cdc`; it switches backends (and saves the choice).
 - `POST /api/reset_board` with `{"confirm": true}` deliberately pulses DTR to reboot the printer board. It's the only code path that ever toggles DTR, and it has not been tested on real hardware.
 
 ## Config
@@ -137,7 +138,7 @@ curl -X POST -H "$H" -H 'Content-Type: application/json' \
 
 | Key | Default | Notes |
 |---|---|---|
-| `backend` | `real` | `real`, `fake` or `sim-usb` |
+| `backend` | `real` | `real`, `fake`, `sim-usb` or `sim-cdc` |
 | `real_safety_lock` | `true` | Allow only read-only commands on the real printer |
 | `idle_shutdown_s` | `300` | `M85` timeout armed at job start (0 disables) |
 | `idle_temp_poll` | `false` | Poll `M105` while idle so temperatures refresh |
@@ -202,7 +203,7 @@ curl -X POST -H "$H" $B/api/config/telegram/test
 
 `source` is `none`, `self-signed` or `acme`; `issuance.state` is `idle`, `running`, `succeeded` or `failed` (with `error`). `/api/status` carries a short version under `service.tls`, and `service.urls` lists the HTTPS URLs.
 
-## Simulator controls (fake and sim-usb backends only)
+## Simulator controls (fake, sim-usb and sim-cdc backends only)
 
 - `POST /api/sim/error` with `{"kind": "thermal_runaway"}`, `"mintemp"` or `"disconnect"` triggers a simulated printer error.
 - `POST /api/sim/config` with `line_delay_ms`, `time_scale` and/or `inject_resend_every` tunes the simulator.

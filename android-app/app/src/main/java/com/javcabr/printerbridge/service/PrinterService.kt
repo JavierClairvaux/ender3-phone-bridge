@@ -30,8 +30,13 @@ import com.javcabr.printerbridge.printer.RealPrinterConnection
 import com.javcabr.printerbridge.server.ApiServer
 import com.javcabr.printerbridge.server.BridgeHost
 import com.javcabr.printerbridge.ui.MainActivity
+import com.javcabr.printerbridge.printer.CdcPrinterConnection
 import com.javcabr.printerbridge.usb.AndroidUsbIo
+import com.javcabr.printerbridge.usb.SimCdcUsbIo
 import com.javcabr.printerbridge.usb.SimCh340UsbIo
+import com.javcabr.printerbridge.usb.Transport
+import com.javcabr.printerbridge.usb.UsbCatalog
+import com.javcabr.printerbridge.usb.UsbProfile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -55,7 +60,7 @@ import java.net.NetworkInterface
  *
  * adb control (all extras optional):
  *   am start-foreground-service -n <pkg>/com.javcabr.printerbridge.service.PrinterService \
- *     --es backend fake|real|sim-usb --ez idle_temp_poll false --el real_settle_ms 4000 \
+ *     --es backend fake|real|sim-usb|sim-cdc --ez idle_temp_poll false --el real_settle_ms 4000 \
  *     --ez auto_connect false --ez connect true | --ez disconnect true | --ez stop true
  */
 class PrinterService : Service(), ControllerEvents, BridgeHost {
@@ -83,14 +88,14 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
             val dev = deviceExtra(i)
-            val isCh340 = dev != null && dev.vendorId == AndroidUsbIo.VID && dev.productId == AndroidUsbIo.PID
+            val profile = dev?.let { UsbCatalog.identify(it) }   // a known printer board, or null for any other USB device
             when (i.action) {
-                UsbManager.ACTION_USB_DEVICE_DETACHED -> if (isCh340) {
-                    Log.w(TAG, "CH340 detached")
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> if (profile != null) {
+                    Log.w(TAG, "${profile.id} detached")
                     if (controller.connection()?.kind == "real") controller.onDeviceDetached("USB device detached")
                 }
-                UsbManager.ACTION_USB_DEVICE_ATTACHED -> if (isCh340 && settings.backend == "real" && settings.autoConnect) {
-                    Log.i(TAG, "CH340 attached: auto-connecting"); connectAsync()
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> if (profile != null && settings.backend == "real" && settings.autoConnect) {
+                    Log.i(TAG, "${profile.id} attached: auto-connecting"); connectAsync()
                 }
                 ACTION_USB_PERMISSION -> {
                     val granted = i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
@@ -148,6 +153,8 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
             i.getStringExtra("backend")?.let { settings.backend = it }
             if (i.hasExtra("idle_temp_poll")) settings.idleTempPoll = i.getBooleanExtra("idle_temp_poll", true)
             if (i.hasExtra("real_settle_ms")) settings.realSettleMs = i.getLongExtra("real_settle_ms", 750)
+            // diagnostics (adb only): log every bulk-IN packet length and every received line other than "ok"
+            if (i.hasExtra("rx_trace")) AndroidUsbIo.rxTrace = i.getBooleanExtra("rx_trace", false)
             applyRuntimeSettings()
             if (i.getBooleanExtra("disconnect", false)) Thread { runCatching { disconnectPrinter() }.onFailure { Log.w(TAG, "disconnect: $it") } }.start()
             if (i.hasExtra("auto_connect")) settings.autoConnect = i.getBooleanExtra("auto_connect", true)
@@ -179,17 +186,48 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
 
     // ------------------------------------------------------------------ BridgeHost
 
-    fun makeConnection(backend: String): PrinterConnection = when (backend) {
-        "fake" -> FakePrinterConnection(FakeMarlin.shared)
-        "sim-usb" -> RealPrinterConnection(this, "sim-usb",
-            { SimCh340UsbIo(FakeMarlin.shared, staleOnOpen = byteArrayOf(0xf8.toByte(), 0x80.toByte(), 0x78, 0xfe.toByte(), 0x00, 0x86.toByte(), 0x0e)) },
-            { false }, settings.realSettleMs)
-        "real" -> RealPrinterConnection(this, "real", {
-            val d = AndroidUsbIo.findCh340(usb) ?: throw IOException("CH340 (1a86:7523) not attached")
-            if (!usb.hasPermission(d)) { requestUsbPermission(d); throw IllegalStateException("USB permission not granted yet: accept the dialog on the phone, then connect again") }
-            AndroidUsbIo(usb, d)
-        }, { settings.realSafetyLock }, settings.realSettleMs)
-        else -> throw IllegalArgumentException("unknown backend $backend")
+    /** Open the attached device on the Android USB Host API, asking for permission first if needed. */
+    private fun openAndroidUsb(d: UsbDevice, profile: UsbProfile): AndroidUsbIo {
+        if (!usb.hasPermission(d)) {
+            requestUsbPermission(d)
+            throw IllegalStateException("USB permission not granted yet for ${profile.name}: accept the dialog on the phone, then connect again")
+        }
+        return AndroidUsbIo(usb, d)
+    }
+
+    fun makeConnection(backend: String): PrinterConnection {
+        if (backend != "sim-cdc") FakeMarlin.shared.marlin2 = false   // SimCdcUsbIo switches it on for itself
+        return when (backend) {
+            "fake" -> FakePrinterConnection(FakeMarlin.shared)
+            "sim-usb" -> RealPrinterConnection(this, "sim-usb",
+                { SimCh340UsbIo(FakeMarlin.shared, staleOnOpen = byteArrayOf(0xf8.toByte(), 0x80.toByte(), 0x78, 0xfe.toByte(), 0x00, 0x86.toByte(), 0x0e)) },
+                { false }, settings.realSettleMs)
+            // Simulated SKR (native USB CDC, Marlin 2) with a port that stays silent until DTR is raised.
+            "sim-cdc" -> CdcPrinterConnection("sim-cdc", UsbCatalog.KNOWN.first { it.transport == Transport.CDC_ACM },
+                { SimCdcUsbIo(FakeMarlin.shared, requireDtr = true) }, { false }, settings.realSettleMs)
+            // The printer over USB. The board is detected from its USB ids: a CH340 uses the Python driver
+            // (Marlin 1.1.6 Ender 3 board), a CDC-ACM board (SKR Mini E3 V3.0) uses CdcPrinterConnection.
+            "real" -> {
+                val found = UsbCatalog.find(usb)
+                // The descriptor strings can say what a board runs before anything is sent to it (Klipper
+                // boards name themselves "Klipper"); a board in a bootloader isn't a printer yet either.
+                val refusal = found?.let { UsbCatalog.refusal(it.hint) }
+                    ?: UsbCatalog.findRefused(usb)?.let { (d, why) -> "${AndroidUsbIo.describe(d)}: $why" }
+                if (refusal != null)
+                    CdcPrinterConnection("real", found?.profile ?: UsbCatalog.GENERIC_CDC, { throw IOException(refusal) },
+                        { settings.realSafetyLock }, settings.realSettleMs)
+                else if (found != null && found.profile.transport == Transport.CDC_ACM)
+                    CdcPrinterConnection("real", found.profile, { openAndroidUsb(found.device, found.profile) },
+                        { settings.realSafetyLock }, settings.realSettleMs)
+                else
+                    RealPrinterConnection(this, "real", {
+                        val f = UsbCatalog.find(usb)?.takeIf { it.profile.transport == Transport.CH340 }
+                            ?: throw IOException("no supported printer board attached (looking for a CH340 1a86:7523 or a CDC-ACM board such as the SKR Mini E3 V3.0 0483:5740)")
+                        openAndroidUsb(f.device, f.profile)
+                    }, { settings.realSafetyLock }, settings.realSettleMs)
+            }
+            else -> throw IllegalArgumentException("unknown backend $backend")
+        }
     }
 
     override fun connectBackend(backend: String?): JSONObject {
@@ -217,8 +255,8 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
         val c = controller.connection() ?: throw IllegalStateException("not connected")
         when {
             c is FakePrinterConnection && kind == "disconnect" -> c.simulateDisconnect()
-            c.kind == "fake" || c.kind == "sim-usb" -> FakeMarlin.shared.triggerError(kind)
-            else -> throw IllegalStateException("simulated errors are only available on the fake / sim-usb backends")
+            c.kind == "fake" || c.kind == "sim-usb" || c.kind == "sim-cdc" -> FakeMarlin.shared.triggerError(kind)
+            else -> throw IllegalStateException("simulated errors are only available on the fake / sim-usb / sim-cdc backends")
         }
         return JSONObject().put("triggered", kind).put("backend", c.kind)
     }
@@ -253,7 +291,14 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
             .put("wake_lock_held", wakeLock?.isHeld == true).put("wifi_lock_held", wifiLock?.isHeld == true)
             .put("device_idle_mode", pm.isDeviceIdleMode).put("interactive", pm.isInteractive)
             .put("ignoring_battery_optimizations", pm.isIgnoringBatteryOptimizations(packageName))
-            .put("usb_permission", AndroidUsbIo.findCh340(usb)?.let { usb.hasPermission(it) } ?: JSONObject.NULL)
+            .put("usb_permission", UsbCatalog.find(usb)?.let { usb.hasPermission(it.device) } ?: JSONObject.NULL)
+            .put("usb_detected", UsbCatalog.find(usb)?.let { f ->
+                JSONObject().put("profile", f.profile.id).put("name", f.profile.name).put("transport", f.profile.transport.wire)
+                    .put("vendor_id", "%04x".format(f.device.vendorId)).put("product_id", "%04x".format(f.device.productId))
+                    .put("manufacturer", f.device.manufacturerName ?: JSONObject.NULL)
+                    .put("product", f.device.productName ?: JSONObject.NULL).put("verified", f.profile.verified)
+                    .put("firmware_hint", f.hint.name.lowercase())
+            } ?: JSONObject.NULL)
             .put("real_safety_lock", settings.realSafetyLock)
     }
 

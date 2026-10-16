@@ -9,7 +9,8 @@ Features:
 - Pause with park, retract and reheat; resume restores the exact position and state.
 - Telegram notifications for print done and print error.
 - Optional HTTPS: a self-signed certificate out of the box, or a Let's Encrypt certificate the app obtains and renews itself (DNS-01 through the GoDaddy API). Plain HTTP stays the default.
-- A built-in simulated Marlin (`fake` and `sim-usb` backends) for testing without a printer.
+- Board detection: the stock Ender 3 board (CH340) and the SKR Mini E3 V3.0 (native USB CDC) are recognised from their USB ids, and the firmware identifies itself through `M115` (family, version, capabilities).
+- A built-in simulated Marlin (`fake`, `sim-usb` and `sim-cdc` backends) for testing without a printer.
 
 ## Status
 
@@ -25,6 +26,8 @@ Only tested against the simulator so far:
 - Pause, park and resume on a real print, including pausing during heat-up.
 - Unplug and replug during a print, the USB permission-denied path, and `/api/reset_board`.
 - Doze and battery-optimization behavior on the phone over a long print.
+
+SKR Mini E3 V3.0 (native USB CDC, Marlin 2): detected, identified from `M115`, and driven through two 5,003-line bench jobs on the phone (no heaters or motors): 0 resends, 0 stalls, 530 s each. Not yet used for a real print.
 
 TLS (HTTPS) status: the app obtained a production Let's Encrypt certificate for `printer.theconsortio.xyz` on the phone (DNS-01 through GoDaddy) and serves it over HTTPS, verified with the system trust store (REST and MCP). Staging was verified first. No print has run over HTTPS yet.
 

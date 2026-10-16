@@ -18,6 +18,12 @@ Dashboard / REST / MCP / native UI
          UsbIo (Kotlin)  ◄── callbacks ──  unmodified ch340_serial.py
               │
    Android USB Host API → CH340 → Marlin 1.1.6.2
+
+   PrinterConnection  ── CdcPrinterConnection (safety lock, no Python)
+              │
+         UsbIo + CdcControl (Kotlin)
+              │
+   Android USB Host API → STM32 native USB (CDC-ACM) → Marlin 2 (SKR Mini E3 V3.0)
 ```
 
 Code is under `app/src/main/java/com/javcabr/printerbridge/` and `app/src/main/python/`:
@@ -25,6 +31,10 @@ Code is under `app/src/main/java/com/javcabr/printerbridge/` and `app/src/main/p
 | Piece | Role |
 |---|---|
 | `usb/AndroidUsbIo.kt` | The real `UsbIo`: opens the device, claims the bulk interface, and runs the queued reader |
+| `usb/UsbCatalog.kt` | Known USB ids and the generic CDC-ACM fallback; maps a device to a profile (transport, whether to raise DTR) |
+| `usb/SimCdcUsbIo.kt` | Simulated native-USB CDC board in front of the simulator (Marlin 2 identity); a DTR edge does not reset it, and `requireDtr` models a port that is silent until DTR is raised |
+| `printer/CdcPrinterConnection.kt` | Native-USB boards: line coding, optional DTR/RTS, line I/O straight over the bulk endpoints, the same safety lock |
+| `printer/BoardInfo.kt` | Parses the `M115` reply (firmware, version, machine type, UUID, `Cap:` lines) into the board family and capabilities |
 | `usb/SimCh340UsbIo.kt` | Simulated CH340 in front of the simulator; any DTR edge reboots it, so tests can prove the app never produces one |
 | `python/printer_link.py` | `KotlinUsbBackend` plus `DtrSafeCH340Serial`, a subclass of the unmodified driver, and a `Link` wrapper with line I/O and a post-open drain |
 | `printer/RealPrinterConnection.kt` | Chaquopy to `printer_link`, with the safety lock |
@@ -48,6 +58,18 @@ Code is under `app/src/main/java/com/javcabr/printerbridge/` and `app/src/main/p
 These findings drive the rules the app follows. All were observed on a Redmi Note 9 Pro and a stock Ender 3.
 
 **1. Only DTR edges reset Marlin.** Opening and claiming the USB device, running the full chip init and toggling RTS never reset the board. Switching DTR in either direction does, and so does the old driver's `close()` after DTR was raised. That explains the long-standing "resets even with `reset_on_open=False`": `_init_chip()` turns the lines off and `reset_on_open=False` then immediately raises DTR, which is the same edge as the reset pulse. The app keeps DTR and RTS off for the whole connection, on open and on close. M115, M105 and M503 all work with DTR off, and reconnecting never reboots the board, so a print survives an app restart and no re-homing is needed. `deliberate_reset()` is the only DTR path and is reachable only through `/api/reset_board`.
+
+**1b. The phone kernel has no CDC-ACM, and the app does not need it.** On the Redmi Note 9 Pro `CONFIG_USB_ACM` and `CONFIG_USB_SERIAL` are both unset, so an SKR Mini E3 V3.0 never gets a `/dev/ttyACM0` there. The Termux scripts need a userspace driver for it (a pyusb test script showed M115, M503 and M122 working), and the app does the same through the USB Host API: it claims the CDC data interface (bulk IN and OUT) and the control interface and talks to the board directly, so no kernel driver is involved. The SKR enumerates only with the `SW_USB` jumper cap on (USB 5V powers the MCU) or with 24V on the board.
+
+**1c. Board identification, and what other software does.** Three layers, each cheap before the next:
+
+1. *USB ids and descriptor strings* (`UsbCatalog`). Klipper identifies its boards this way: a Klipper MCU enumerates as manufacturer `Klipper` with the MCU as product (`usb-Klipper_stm32g0b1xx_<serial>` under `/dev/serial/by-id`), while a board still on stock Marlin reports `MARLIN_STM32G0B1RE CDC in FS Mode` (read from the SKR on 2026-10-14). The app reads the same strings (`firmware_hint`: marlin, klipper, bootloader, unknown) before sending anything, refuses to drive a Klipper board with the Marlin backend and says so, and does the same for an STM32 ROM DFU device (`0483:df11`). The Katapult/CanBoot names are from memory, not seen here. [usb-serial-for-android](https://github.com/mik3y/usb-serial-for-android) uses the same shape: a vendor/product table plus CDC detection by interface class.
+2. *The firmware's own answer to `M115`* (`BoardInfo`). OctoPrint sends `M115` once connected and lowercases the firmware name to apply per-firmware quirks by substring (`repetier`, `reprapfirmware`, `malyan`, `klipper`, `prusa-firmware`; `comm.py`). `BoardInfo.kind` does the same and `warning` flags anything that is not Marlin. OctoPrint also collects `Cap:` lines until a non-`Cap:` line arrives, and uses a capability only if both the local settings and the firmware allow it (`_capability_supported`). The app exposes the flags the same way.
+3. *Retry the handshake.* OctoPrint's serial detection tries a port a few times (an empty line plus a hello, accepting `start` or `ok`). The SKR drops bytes out of long bursts, so the app asks for `M115` up to 3 times, keeps the most complete reply (full identity line, most `Cap:` lines) and stops when two replies agree.
+
+Not done yet (these change what is sent to the printer, so they need a hardware pass): `M155 S2` temperature autoreport when `AUTOREPORT_TEMP:1` (OctoPrint does this and stops polling `M105`), `M113` busy protocol, cancel through `M108`/`M410`/`M112` without waiting for an `ok` when `EMERGENCY_PARSER:1` (OctoPrint sends its emergency commands out of band), OctoPrint's timeout ladder (on a missing `ok` while printing it sends `M105` and gives up after a maximum number of consecutive timeouts), a guard on repeated resends of one line, and a resend-ratio warning. Sources: OctoPrint `src/octoprint/util/comm.py` and the [Klipper](https://klipper.discourse.group/t/ls-dev-serial-by-id-is-not-being-properly-generated/24383) and [OctoPrint](https://community.octoprint.org/t/whats-the-deal-with-serial-autodetection/39169) forums.
+
+**1d. Reads on a native-USB board must be handed back fast.** A CDC board prints a reply as many tiny packets (1 to 2 bytes each), and each one completes a whole queued request. With 4 requests queued the SKR Mini E3 V3.0 lost pieces of replies: damaged `M105` lines (2.5% to 16% of them in a bench job), sometimes with the newline missing so two replies were glued together and the app waited 30 s for an `ok`. The same board returned 350 of 350 whole replies to a Linux host using the kernel `cdc_acm` driver, so the fault is in how fast the phone side hands its requests back, not in the board. For CDC data endpoints the app now keeps 32 requests queued and re-queues each one before handling its bytes (`AndroidUsbIo`); a CH340 keeps the original 4-request path unchanged. The 5,003-line bench job (no heaters, no motors) went from 1,276 s with 25 stalls to 530 s with 0 stalls, twice. Not tested yet: heat waits and a real print on the SKR. The explanation (requests used up in a burst, board's USB stack discarding the next piece while the endpoint is unpolled) fits the data but is not proven.
 
 **2. RX must use a queued reader.** Calling `bulkTransfer` once per packet from Python let the CH340's small FIFO overflow between calls, silently dropping bytes mid-line (for example `PROTOC1.0 MACHINE_TYPE`). M115 replies were intact only 0–8 times in 10 in direct mode. A Kotlin thread that keeps four 512-byte `UsbRequest`s queued gave 10/10 clean M115 replies, byte-identical 820-byte M503 dumps and 100/100 clean M105 replies. The app uses only the queued path. A corrupted `ok`, `Resend` or temperature line would be dangerous during a print.
 

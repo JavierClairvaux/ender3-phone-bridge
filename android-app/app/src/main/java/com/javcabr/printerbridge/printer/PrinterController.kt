@@ -82,6 +82,8 @@ class PrinterController(
     @Volatile var connError: String? = null; private set
     @Volatile var firmware: String? = null; private set
     @Volatile var machineType: String? = null; private set
+    /** Identity parsed from the M115 reply on connect (see [BoardInfo]); null until connected. */
+    @Volatile var board: BoardInfo? = null; private set
     @Volatile var halted = false; private set
 
     // temperatures / position
@@ -177,19 +179,36 @@ class PrinterController(
         if (job?.state?.active == true) throw BusyException("a job is active (${job?.state?.wire}); cancel it first")
         closeConn()
         connState = "connecting"; connError = null; halted = false; homed = false
+        firmware = null; machineType = null; board = null   // a different board may be behind this connection
         conn = c
         try {
             c.open()
             connState = "connected"
             say("connected (${c.kind})")
             // Firmware identity (M115, read-only). Also the only command sent on connect.
-            val reply = sendAndWait("M115", numbered = false, poke = false, maxWaitMs = 10_000)
+            // A native-USB board can lose bytes out of a long burst (the SKR's CDC transmit buffer
+            // overflows; on 2026-10-16 about half of the M115 replies came back with missing ranges),
+            // so ask up to M115_ATTEMPTS times, keep the most complete answer and stop as soon as two
+            // consecutive answers agree on the number of capability lines.
+            var reply = emptyList<String>()
+            var best: BoardInfo? = null
+            var prevCaps = -1
+            for (attempt in 1..M115_ATTEMPTS) {
+                val r = sendAndWait("M115", numbered = false, poke = false, maxWaitMs = 10_000)
+                val b = BoardInfo.parse(r)
+                if (b != null && b.complete && (best == null || b.capabilities.size > best.capabilities.size)) { best = b; reply = r }
+                else if (best == null) reply = r
+                val caps = if (b?.complete == true) b.capabilities.size else -1
+                if (caps >= 0 && caps == prevCaps) break
+                prevCaps = caps
+            }
             reply.firstOrNull { it.contains("FIRMWARE_NAME:") }?.let { l ->
                 firmware = l.substringAfter("FIRMWARE_NAME:").substringBefore(" SOURCE_CODE_URL").trim()
                 machineType = Regex("MACHINE_TYPE:(.*?) EXTRUDER_COUNT").find(l)?.groupValues?.get(1)
             }
+            board = BoardInfo.parse(reply)
             Log.i(TAG, "M115 reply (${reply.size} lines): ${reply.joinToString(" | ")}")
-            say("firmware=$firmware machine=$machineType")
+            say("firmware=$firmware machine=$machineType family=${board?.family} emergency_parser=${board?.emergencyParser}")
             lastPoll = 0
             // A job that lost its link earlier may have left the board's M85 timer running
             // (reconnecting doesn't reset the board). Only sends anything if we armed it.
@@ -376,7 +395,8 @@ class PrinterController(
     fun connectionJson(): JSONObject {
         val o = JSONObject().put("state", connState).put("backend", conn?.kind ?: JSONObject.NULL)
             .put("error", connError ?: JSONObject.NULL).put("firmware", firmware ?: JSONObject.NULL)
-            .put("machine_type", machineType ?: JSONObject.NULL).put("halted", halted)
+            .put("machine_type", machineType ?: JSONObject.NULL).put("board", board?.toJson() ?: JSONObject.NULL)
+            .put("halted", halted)
             .put("lines_sent_total", linesSentTotal).put("last_rx", lastLineRx ?: JSONObject.NULL)
         conn?.info()?.let { info -> o.put("details", JSONObject(info.mapValues { it.value ?: JSONObject.NULL })) }
         return o
@@ -900,6 +920,8 @@ class PrinterController(
 
     companion object {
         const val TAG = "PrinterBridge.ctl"
+        /** Upper bound on M115 requests at connect (see connect()). */
+        const val M115_ATTEMPTS = 3
         const val MIN_EXTRUDE_C = 170.0   // Marlin EXTRUDE_MINTEMP
     }
 }

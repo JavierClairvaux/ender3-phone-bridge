@@ -44,6 +44,12 @@ class FakeMarlin {
     @Volatile var lineDelayMs = 15L
     @Volatile var timeScale = 1.0
     @Volatile var injectResendEvery = 0
+    /**
+     * Identity switch for M115: false = the Marlin 1.1.6.2 Ender 3 board (CH340), true = a Marlin 2.0.x
+     * bugfix build as on the SKR Mini E3 V3.0 (native USB), which reports EMERGENCY_PARSER:1 and
+     * AUTOLEVEL/Z_PROBE:0 like the real board (captured 2026-10-14). Everything else behaves the same.
+     */
+    @Volatile var marlin2 = false
 
     @Volatile private var sink: ((String) -> Unit)? = null
     private val input = LinkedBlockingQueue<String>()
@@ -243,9 +249,20 @@ class FakeMarlin {
             "M105" -> emit(tempLine(true))
             "M114" -> { emit("X:${fmt(x)} Y:${fmt(y)} Z:${fmt(z)} E:${fmt(e)} Count X:${(x * 80).toLong()} Y:${(y * 80).toLong()} Z:${(z * 400).toLong()}"); emit("ok") }
             "M115" -> {
-                emit("FIRMWARE_NAME:Marlin FAKE-SIMULATOR (PrinterBridge FakeMarlin) SOURCE_CODE_URL:none PROTOCOL_VERSION:1.0 MACHINE_TYPE:Ender-3 (simulated) EXTRUDER_COUNT:1 UUID:00000000-0000-0000-0000-000000000000")
-                listOf("SERIAL_XON_XOFF:0", "EEPROM:1", "VOLUMETRIC:1", "AUTOREPORT_TEMP:0", "PROGRESS:0", "PRINT_JOB:1",
-                    "AUTOLEVEL:0", "Z_PROBE:0", "LEVELING_DATA:0", "SOFTWARE_POWER:0", "TOGGLE_LIGHTS:0").forEach { emit("Cap:$it") }
+                if (marlin2) {
+                    emit("FIRMWARE_NAME:Marlin bugfix-2.0.x (Oct 11 2022 14:32:21) SOURCE_CODE_URL:github.com/MarlinFirmware/Marlin PROTOCOL_VERSION:1.0 MACHINE_TYPE:Ender-3 EXTRUDER_COUNT:1 UUID:cede2a2f-41a2-4748-9b12-c55c62f367ff")
+                    listOf("SERIAL_XON_XOFF:0", "BINARY_FILE_TRANSFER:0", "EEPROM:1", "VOLUMETRIC:1", "AUTOREPORT_POS:1",
+                        "AUTOREPORT_TEMP:1", "PROGRESS:0", "PRINT_JOB:1", "AUTOLEVEL:0", "RUNOUT:0", "Z_PROBE:0",
+                        "LEVELING_DATA:1", "BUILD_PERCENT:1", "SOFTWARE_POWER:0", "TOGGLE_LIGHTS:0",
+                        "CASE_LIGHT_BRIGHTNESS:0", "EMERGENCY_PARSER:1", "HOST_ACTION_COMMANDS:1", "PROMPT_SUPPORT:1",
+                        "SDCARD:1", "REPEAT:0", "SD_WRITE:1", "AUTOREPORT_SD_STATUS:1", "LONG_FILENAME:1",
+                        "THERMAL_PROTECTION:1", "MOTION_MODES:0", "ARCS:1", "BABYSTEPPING:1", "CHAMBER_TEMPERATURE:0",
+                        "COOLER_TEMPERATURE:0", "MEATPACK:0").forEach { emit("Cap:$it") }
+                } else {
+                    emit("FIRMWARE_NAME:Marlin FAKE-SIMULATOR (PrinterBridge FakeMarlin) SOURCE_CODE_URL:none PROTOCOL_VERSION:1.0 MACHINE_TYPE:Ender-3 (simulated) EXTRUDER_COUNT:1 UUID:00000000-0000-0000-0000-000000000000")
+                    listOf("SERIAL_XON_XOFF:0", "EEPROM:1", "VOLUMETRIC:1", "AUTOREPORT_TEMP:0", "PROGRESS:0", "PRINT_JOB:1",
+                        "AUTOLEVEL:0", "Z_PROBE:0", "LEVELING_DATA:0", "SOFTWARE_POWER:0", "TOGGLE_LIGHTS:0").forEach { emit("Cap:$it") }
+                }
                 emit("ok")
             }
             "M119" -> { emit("Reporting endstop status"); emit("x_min: ${if (x <= 0) "TRIGGERED" else "open"}"); emit("y_min: ${if (y <= 0) "TRIGGERED" else "open"}"); emit("z_min: ${if (z <= 0) "TRIGGERED" else "open"}"); emit("ok") }

@@ -257,7 +257,7 @@ class AppSettings(context: Context) {
         const val K_BACKEND = "backend"
         const val K_API_TOKEN = "api_token"
         const val DEFAULT_TELEGRAM_BASE = "https://api.telegram.org"
-        val BACKENDS = listOf("fake", "real", "sim-usb")
+        val BACKENDS = listOf("fake", "real", "sim-usb", "sim-cdc")
 
         fun mask(s: String) = if (s.isEmpty()) "" else if (s.length <= 8) "****" else s.take(4) + "..." + s.takeLast(4)
 

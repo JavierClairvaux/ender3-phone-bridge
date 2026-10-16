@@ -2,4 +2,7 @@
 <resources>
     <!-- WCH CH340 (Ender 3 USB-serial): 0x1a86 = 6790, 0x7523 = 29987 -->
     <usb-device vendor-id="6790" product-id="29987" />
+    <!-- STMicroelectronics Virtual COM Port (SKR Mini E3 V3.0, native USB CDC): 0x0483 = 1155, 0x5740 = 22336.
+         Keep in step with UsbCatalog.KNOWN. -->
+    <usb-device vendor-id="1155" product-id="22336" />
 </resources>
