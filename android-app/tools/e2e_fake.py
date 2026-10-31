@@ -67,6 +67,15 @@ def tg_messages():
         return []
 
 
+def raw_initialize():
+    """initialize over plain HTTP: the SDK client drops serverInfo extras and may reuse an earlier result."""
+    req = urllib.request.Request(args.base + "/mcp", method="POST", data=json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "1"}}}).encode(),
+        headers={"Authorization": "Bearer " + args.token, "Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
+    return json.load(urllib.request.urlopen(req, timeout=20))["result"]
+
+
 def screenshot(name):
     path = f"{args.out}_{name}.png"
     subprocess.run(["chromium", "--headless=new", "--disable-gpu", "--hide-scrollbars", f"--screenshot={path}",
@@ -310,6 +319,11 @@ async def main():
         d0, res = guarded("printing")
         e, m = await tool("home")
         res.append(("mcp_home", e is True and "refused" in str(m), None, str(m)[:120]))
+        e, sg = await tool("send_gcode", commands=["G28", "M104 S50"], stop_on_error=False)
+        res.append(("mcp_send_gcode_refused", not e and sg["ok"] is False and all(r["ok"] is False and r.get("refused") and r.get("sent") is False
+                    for r in sg["data"]["results"]) and len(sg["data"]["results"]) == 2, None, sg))
+        e, sg = await tool("send_gcode", commands=["M105", "M114"])
+        res.append(("mcp_send_gcode_readonly_allowed_mid_print", not e and sg["ok"] is True and len(sg["data"]["results"]) == 2, None, str(sg)[:160]))
         check("printing_refuses_home_and_motion_rest_and_mcp", all(x[1] for x in res), res)
         dom = dashboard_dom()
         hb, sb = button_tag(dom, "homeBtn"), button_tag(dom, "startBtn")
@@ -344,6 +358,150 @@ async def main():
         c, r = rest("POST", "/api/home")
         check("rest_home_allowed_when_idle", c == 200 and r.get("ok") is True, c)
         check("no_telegram_from_phase_f", len(tg_messages()) == n_tg5)
+
+        # ---------------- G (batch 0): capability profile, send_gcode, server_info, unsupported convention (Ender 3 fake) ----------------
+        rest("POST", "/api/sim/config", {"line_delay_ms": 5, "time_scale": 20, "profile": "ender3"})
+        rest("POST", "/api/connection", {"action": "disconnect"})
+        rest("POST", "/api/connection", {"action": "connect"})
+        wait(lambda: status()["connection"]["state"] == "connected", 30, "reconnect G")
+        tools = {t.name: t for t in (await mcp.list_tools()).tools}
+        check("mcp_batch0_tools_listed", {"send_gcode", "board_info", "server_info"} <= set(tools) and len(tools) >= 12, sorted(tools))
+        check("mcp_tools_have_descriptions_and_schemas", all(t.description and (getattr(t, "inputSchema", None) or t.input_schema).get("type") == "object" for t in tools.values()))
+        check("mcp_tool_names_unique", len(tools) == len((await mcp.list_tools()).tools))
+        init2 = raw_initialize()
+        ins = init2.get("instructions") or ""
+        check("mcp_instructions_rewritten_no_stale_text", "no Z-probe" not in ins and "Marlin 1.1.6" not in ins and "get_status" in ins
+              and "operating-guide" in ins and "no z probe" in ins.lower(), ins)
+        check("mcp_serverinfo_has_schema_version", init2["serverInfo"].get("schema_version") == 1 and init2["serverInfo"].get("version"), init2["serverInfo"])
+        check("mcp_sdk_client_still_initializes", (await mcp.initialize()).server_info.name == "printer-bridge")
+
+        e, bi = await tool("board_info")
+        d = bi.get("data", {})
+        check("mcp_board_info_ender_fake", not e and bi["ok"] is True and d["probe_present"] is False and d["capabilities"].get("Z_PROBE") is False
+              and d["soft_limit_size"] == {"x": 220.0, "y": 220.0} and d["z_max"] == 250.0 and d["board_key"] is None
+              and "firmware build not in the quirks registry" in bi["warnings"], bi)
+        pr = status()["connection"]["profile"]
+        check("rest_status_carries_profile", status()["connection"]["board"] is not None and pr is not None
+              and pr["capabilities"] == d["capabilities"] and pr["soft_limit_size"] == d["soft_limit_size"], pr)
+
+        e, sg = await tool("send_gcode", command="M105")
+        check("mcp_send_gcode_single", not e and sg["ok"] and len(sg["data"]["results"]) == 1 and any("T:" in l for l in sg["data"]["results"][0]["reply"]), sg)
+        e, sg = await tool("send_gcode", commands=["M105", "M114"])
+        r0 = sg["data"]["results"]
+        check("mcp_send_gcode_batch_m105_m114", not e and sg["ok"] and len(r0) == 2 and any("T:" in l for l in r0[0]["reply"])
+              and any(l.startswith("X:") for l in r0[1]["reply"]), sg)
+        n0 = status()["connection"]["details"]["sim_non_report_commands"]
+        e, sg = await tool("send_gcode", command="M105\nM104 S250")
+        check("mcp_send_gcode_rejects_embedded_newline", not e and sg["ok"] is False and "single line" in sg["error"]
+              and status()["connection"]["details"]["sim_non_report_commands"] == n0, sg)
+        e, sg = await tool("send_gcode")
+        check("mcp_send_gcode_needs_a_command", not e and sg["ok"] is False and "error" in sg, sg)
+
+        # unknown command: not ok, learned into known_missing_commands, and not sent a second time
+        n_before = status()["connection"]["details"]["sim_non_report_commands"]
+        e, sg = await tool("send_gcode", commands=["M48 P3", "M105"], stop_on_error=True)
+        check("mcp_send_gcode_unknown_command_flagged_and_stops", not e and sg["ok"] is False and sg["data"]["results"][0]["ok"] is False
+              and sg["data"]["skipped"] == ["M105"], sg)
+        e, bi = await tool("board_info")
+        check("profile_learns_known_missing_commands", "M48" in bi["data"]["known_missing_commands"], bi["data"]["known_missing_commands"])
+        n_mid = status()["connection"]["details"]["sim_non_report_commands"]
+        e, sg = await tool("send_gcode", command="M48")
+        r1 = sg["data"]["results"][0]
+        check("known_missing_command_is_not_sent_again", sg["ok"] is False and r1.get("supported") is False and r1.get("needs") == "command:M48"
+              and r1.get("sent") is False and status()["connection"]["details"]["sim_non_report_commands"] == n_mid, sg)
+
+        # wait_for_moves: a G1 is followed by M400 (the fake logs executed commands)
+        e, sg = await tool("send_gcode", commands=["G90", "G1 X5 Y5 F3000"], wait_for_moves=True)
+        check("mcp_send_gcode_wait_for_moves_sends_m400", not e and sg["ok"] and sg["data"]["results"][1].get("moves_finished") is True, sg)
+        e, sg = await tool("send_gcode", commands=["G90", "G1 X0 Y0 F3000"])
+        check("mcp_send_gcode_no_m400_by_default", not e and "moves_finished" not in sg["data"]["results"][1], sg)
+
+        # unsupported convention through a real tool: probe commands on a board with Cap:Z_PROBE:0 are never sent
+        n_cmds = status()["connection"]["details"]["sim_non_report_commands"]
+        e, sg = await tool("send_gcode", commands=["G30", "G29"], stop_on_error=False)
+        r = sg["data"]["results"]
+        check("mcp_unsupported_probe_command_on_ender_fake", not e and sg["ok"] is False and len(r) == 2
+              and all(x["ok"] is False and x["supported"] is False and x["needs"] == "Cap:Z_PROBE" and x["reason"] and x["sent"] is False for x in r)
+              and status()["connection"]["details"]["sim_non_report_commands"] == n_cmds, sg)
+
+        e, si = await tool("server_info")
+        a = si["data"]["app"]
+        check("mcp_server_info", not e and si["ok"] and si["data"]["mcp"]["schema_version"] == 1 and "2025-06-18" in si["data"]["mcp"]["protocol_versions"]
+              and a["version_name"] and a["git_commit"] and isinstance(a["git_dirty"], bool) and si["data"]["backend"] == "fake", si)
+
+        # ---------------- G2: a rejected request must not poison the kept-alive connection (unread body) ----------------
+        import http.client
+        import urllib.parse
+        u = urllib.parse.urlparse(args.base)
+        mcp_body = json.dumps({"jsonrpc": "2.0", "id": "server-discover-probe-1", "method": "server/discover", "params": {"_meta": {}}})
+        hdr = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+
+        def on(conn, method, path, body=None, tok=None):
+            h = dict(hdr)
+            if tok:
+                h["Authorization"] = "Bearer " + tok
+            conn.request(method, path, body=body, headers=h)
+            r = conn.getresponse()
+            return r.status, r.read().decode()
+
+        kc = http.client.HTTPConnection(u.hostname, u.port, timeout=15)
+        c1, _ = on(kc, "POST", "/mcp", mcp_body, tok="wrong")
+        c2, t2 = on(kc, "POST", "/mcp", mcp_body, tok=args.token)
+        check("wrong_token_then_good_request_same_connection", c1 == 401 and c2 == 200 and "method not found" in t2, (c1, c2, t2[:80]))
+        kc = http.client.HTTPConnection(u.hostname, u.port, timeout=15)
+        c1, _ = on(kc, "POST", "/mcp", mcp_body, tok=None)
+        c2, _ = on(kc, "POST", "/mcp", mcp_body, tok=None)
+        check("no_token_twice_same_connection_gives_401_each_time", c1 == 401 and c2 == 401, (c1, c2))
+        kc = http.client.HTTPConnection(u.hostname, u.port, timeout=15)
+        c1, _ = on(kc, "POST", "/api/no_such_route", json.dumps({"x": 1}), tok=args.token)
+        c2, _ = on(kc, "GET", "/api/status")
+        check("unknown_post_route_does_not_poison_connection", c1 == 404 and c2 == 200, (c1, c2))
+        kc = http.client.HTTPConnection(u.hostname, u.port, timeout=15)
+        c1, _ = on(kc, "POST", "/api/gcode", "{not json", tok=args.token)
+        c2, _ = on(kc, "GET", "/api/status")
+        check("malformed_body_does_not_poison_connection", c1 == 400 and c2 == 200, (c1, c2))
+        kc = http.client.HTTPConnection(u.hostname, u.port, timeout=15)
+        big = "x" * 1_200_000
+        try:
+            c1, _ = on(kc, "POST", "/mcp", big, tok="wrong")
+            closed = True
+        except Exception as e:
+            c1, closed = str(e), True
+        check("oversized_rejected_body_still_gets_401", c1 == 401, c1)
+
+        # ---------------- H (batch 0): SKR + BLTouch profile (fake SKR) ----------------
+        rest("POST", "/api/sim/config", {"profile": "skr"})
+        rest("POST", "/api/connection", {"action": "disconnect"})
+        rest("POST", "/api/connection", {"action": "connect"})
+        wait(lambda: status()["connection"]["state"] == "connected", 30, "reconnect H")
+        e, bi = await tool("board_info")
+        d = bi.get("data", {})
+        check("mcp_board_info_skr_fake_probe_present", not e and bi["ok"] and d["capabilities"].get("Z_PROBE") is True and d["probe_present"] is True
+              and d["autolevel"] is True and d["emergency_parser"] is True, bi)
+        check("board_info_skr_matches_quirk_entry", d["board_key"] == "skr-mini-e3-v3-btt-bltouch-2022-03-11" and "BLTouch" in d["board_name"], d.get("board_key"))
+        check("board_info_skr_limits_leveling_settings", d["soft_limit_size"] == {"x": 235.0, "y": 235.0} and d["z_max"] == 246.7 and d["leveling_on"] is True
+              and d["soft_endstops"] is True and d["limits"]["z_min"] == -3.3
+              and d["mesh_type"] == "bilinear" and d["mesh_grid"] == [5, 5] and d["mesh_z_min"] == -0.04 and d["mesh_z_max"] == 0.04 and d["settings"].get("m206_z") == -3.3 and d["settings"].get("m851_z") == -1.71, d)
+        e, bi2 = await tool("board_info")
+        check("known_missing_resets_on_reconnect", bi2["data"]["known_missing_commands"] == [], bi2["data"]["known_missing_commands"])
+        init3 = raw_initialize()
+        ins = init3.get("instructions") or ""
+        check("mcp_instructions_describe_skr_setup", "SKR Mini E3 V3.0" in ins and "Z probe is present" in ins and "mesh leveling is ON" in ins
+              and "X 0..235" in ins and "Y 0..235" in ins and "Z up to 246.7" in ins, ins)
+        e, sg = await tool("send_gcode", command="G30")
+        check("mcp_probe_command_is_sent_when_probe_present", not e and sg["data"]["results"][0].get("sent") is True
+              and sg["data"]["results"][0].get("supported") is not False, sg)
+        e, sg = await tool("send_gcode", commands=["M105", "M114"])
+        check("mcp_send_gcode_skr_fake", not e and sg["ok"] and len(sg["data"]["results"]) == 2, sg)
+
+        # requireCap helper + unsupported convention: no probe-needing tool exists yet in batch 0, so check the helper
+        # through board_info on a disconnected printer (supported:false with a reason and `needs`)
+        rest("POST", "/api/connection", {"action": "disconnect"})
+        e, bi = await tool("board_info")
+        check("unsupported_convention_when_disconnected", not e and bi["ok"] is False and bi["supported"] is False and bi.get("reason") and bi.get("needs"), bi)
+        rest("POST", "/api/sim/config", {"profile": "ender3"})
+        rest("POST", "/api/connection", {"action": "connect"})
+        wait(lambda: status()["connection"]["state"] == "connected", 30, "reconnect end")
 
     with open(args.out + "_timeline.json", "w") as f:
         json.dump(timeline, f, indent=0)

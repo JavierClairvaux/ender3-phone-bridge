@@ -206,7 +206,7 @@ curl -X POST -H "$H" $B/api/config/telegram/test
 ## Simulator controls (fake, sim-usb and sim-cdc backends only)
 
 - `POST /api/sim/error` with `{"kind": "thermal_runaway"}`, `"mintemp"` or `"disconnect"` triggers a simulated printer error.
-- `POST /api/sim/config` with `line_delay_ms`, `time_scale` and/or `inject_resend_every` tunes the simulator.
+- `POST /api/sim/config` with `line_delay_ms`, `time_scale`, `inject_resend_every` and/or `profile` (`ender3` or `skr`, applies at the next connect) tunes the simulator.
 
 ## MCP
 
@@ -236,5 +236,10 @@ curl -X POST $B/mcp -H "$H" -H 'Content-Type: application/json' -H 'Accept: appl
 | `home` | none | `POST /api/home`; `isError: true` with a `refused: ...` message in any active job state, including paused |
 | `check_temps` | none | `POST /api/check_temps` |
 | `list_print_history` | `limit` (integer, default 20) | `GET /api/history` |
+| `send_gcode` | `command` (string) or `commands` (list, up to 200), `wait_for_moves` (bool, default false), `stop_on_error` (bool, default true) | `POST /api/gcode` for each line, same guard (during a print only `M105`, `M114`, `M115`, `M119`, `M503` and `M211` with no arguments). Result `{ok, data: {results: [{command, ok, reply, ...}], skipped: []}}`; a refused line has `ok: false, refused: true, sent: false`. Commands in `known_missing_commands`, and probe commands (`G29 G30 G31 G32 M401 M402`) on a board with `Cap:Z_PROBE:0`, are not sent and come back `supported: false` |
+| `board_info` | none | The capability profile built at connect (also in `GET /api/status` under `connection.board`, plus `connection.profile`): firmware, build, `capabilities`, `probe_present`, `soft_limit_size` (M211 limits, not the physical bed), `limits`, `soft_endstops`, `z_max`, `leveling_on`, `mesh_type`, `mesh_grid`, `mesh_z_min`/`mesh_z_max` (stored bilinear mesh from M503), `settings` (`m206_z`, `m851_z` ...), `known_missing_commands`, matching `quirks`. `supported: false` when no printer is connected |
+| `server_info` | none | App `version_name`, `version_code`, `git_commit`, `git_dirty`, MCP `schema_version` and protocol versions, backend, printer profile name |
 
-Tool results come back as a text block containing the same JSON as REST. Errors set `isError: true` and put `ExceptionName: message` in the text. There is no MCP tool for raw G-code or config; use REST for those.
+**Result convention (new tools):** `{"ok": true, "data": {...}, "warnings": []}`; not possible on this firmware `{"ok": false, "supported": false, "reason": "...", "needs": "Cap:Z_PROBE"}`; refused or failed `{"ok": false, "error": "..."}`. The nine older tools keep their original shapes. Tools live one file per group in `app/src/main/java/com/javcabr/printerbridge/server/mcp/`, listed in `McpRegistry.kt`. The server `instructions` are built from the capability profile at each `initialize`, and `serverInfo` carries `schema_version`. Board and firmware build quirks are in `app/src/main/assets/quirks.json`.
+
+Tool results come back as a text block containing the same JSON as REST. Errors set `isError: true` and put `ExceptionName: message` in the text. Raw G-code is available through `send_gcode`; config, moves, temperatures, probing and mesh are still REST only until later batches.

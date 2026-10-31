@@ -50,6 +50,12 @@ class FakeMarlin {
      * AUTOLEVEL/Z_PROBE:0 like the real board (captured 2026-10-14). Everything else behaves the same.
      */
     @Volatile var marlin2 = false
+    /**
+     * SKR Mini E3 V3.0 + BLTouch as flashed from BTT's image (Marlin bugfix-2.0.x, Mar 11 2022 16:29:50):
+     * implies the Marlin 2 identity, with AUTOLEVEL/Z_PROBE:1, the 235 x 235 x 250 soft limits and a
+     * bilinear 5x5 leveling grid in M503. Off by default; the service sets it from the `fake_profile` extra.
+     */
+    @Volatile var skr = false
 
     @Volatile private var sink: ((String) -> Unit)? = null
     private val input = LinkedBlockingQueue<String>()
@@ -249,10 +255,10 @@ class FakeMarlin {
             "M105" -> emit(tempLine(true))
             "M114" -> { emit("X:${fmt(x)} Y:${fmt(y)} Z:${fmt(z)} E:${fmt(e)} Count X:${(x * 80).toLong()} Y:${(y * 80).toLong()} Z:${(z * 400).toLong()}"); emit("ok") }
             "M115" -> {
-                if (marlin2) {
-                    emit("FIRMWARE_NAME:Marlin bugfix-2.0.x (Oct 11 2022 14:32:21) SOURCE_CODE_URL:github.com/MarlinFirmware/Marlin PROTOCOL_VERSION:1.0 MACHINE_TYPE:Ender-3 EXTRUDER_COUNT:1 UUID:cede2a2f-41a2-4748-9b12-c55c62f367ff")
+                if (marlin2 || skr) {
+                    emit("FIRMWARE_NAME:Marlin bugfix-2.0.x (${if (skr) "Mar 11 2022 16:29:50" else "Oct 11 2022 14:32:21"}) SOURCE_CODE_URL:github.com/MarlinFirmware/Marlin PROTOCOL_VERSION:1.0 MACHINE_TYPE:Ender-3 EXTRUDER_COUNT:1 UUID:cede2a2f-41a2-4748-9b12-c55c62f367ff")
                     listOf("SERIAL_XON_XOFF:0", "BINARY_FILE_TRANSFER:0", "EEPROM:1", "VOLUMETRIC:1", "AUTOREPORT_POS:1",
-                        "AUTOREPORT_TEMP:1", "PROGRESS:0", "PRINT_JOB:1", "AUTOLEVEL:0", "RUNOUT:0", "Z_PROBE:0",
+                        "AUTOREPORT_TEMP:1", "PROGRESS:0", "PRINT_JOB:1", "AUTOLEVEL:${if (skr) 1 else 0}", "RUNOUT:0", "Z_PROBE:${if (skr) 1 else 0}",
                         "LEVELING_DATA:1", "BUILD_PERCENT:1", "SOFTWARE_POWER:0", "TOGGLE_LIGHTS:0",
                         "CASE_LIGHT_BRIGHTNESS:0", "EMERGENCY_PARSER:1", "HOST_ACTION_COMMANDS:1", "PROMPT_SUPPORT:1",
                         "SDCARD:1", "REPEAT:0", "SD_WRITE:1", "AUTOREPORT_SD_STATUS:1", "LONG_FILENAME:1",
@@ -266,7 +272,18 @@ class FakeMarlin {
                 emit("ok")
             }
             "M119" -> { emit("Reporting endstop status"); emit("x_min: ${if (x <= 0) "TRIGGERED" else "open"}"); emit("y_min: ${if (y <= 0) "TRIGGERED" else "open"}"); emit("z_min: ${if (z <= 0) "TRIGGERED" else "open"}"); emit("ok") }
-            "M503" -> { listOf("echo:  G21    ; Units in mm", "echo:  M149 C ; Units in Celsius", "echo:Steps per unit:", "echo:  M92 X80.00 Y80.00 Z400.00 E93.00").forEach(::emit); emit("ok") }
+            "M211" -> {
+                if (skr) { emit("echo:  M211 S1 ; ON"); emit("echo:  Min:  X0.00 Y0.00 Z-3.30   Max:  X235.00 Y235.00 Z246.70") }
+                else emit("Soft endstops: ON  Min: X0.00 Y0.00 Z0.00  Max: X220.00 Y220.00 Z250.00")
+                emit("ok")
+            }
+            "M503" -> {
+                val l = mutableListOf("echo:  G21    ; Units in mm", "echo:  M149 C ; Units in Celsius", "echo:Steps per unit:", "echo:  M92 X80.00 Y80.00 Z400.00 E93.00")
+                if (skr) l += listOf("echo:Home offset:", "echo:  M206 X0.00 Y0.00 Z-3.30", "echo:; Auto Bed Leveling:", "echo:  M420 S1 Z0.00 ; Leveling ON") +
+                    (0..4).flatMap { j -> (0..4).map { i -> "echo:  G29 W I$i J$j Z${String.format(Locale.US, "%.5f", 0.01 * (i - j))}" } } +
+                    listOf("echo:Z probe offset:", "echo:  M851 X-44.00 Y-5.00 Z-1.71")
+                l.forEach(::emit); emit("ok")
+            }
             "M84", "M18", "M73", "M117", "M220", "M221", "M204", "M205", "M201", "M203", "M400", "M500", "M413", "G4", "G21" -> { if (code == "G4") sleep(((param(words, 'P') ?: 0.0) / timeScale).toLong()); emit("ok") }
             else -> { emit("echo:Unknown command: \"$cmd\""); emit("ok") }
         }

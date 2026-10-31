@@ -23,6 +23,7 @@ import android.util.Log
 import com.javcabr.printerbridge.notify.TelegramNotifier
 import com.javcabr.printerbridge.printer.ControllerEvents
 import com.javcabr.printerbridge.printer.FakeMarlin
+import com.javcabr.printerbridge.printer.QuirkRegistry
 import com.javcabr.printerbridge.printer.FakePrinterConnection
 import com.javcabr.printerbridge.printer.PrinterConnection
 import com.javcabr.printerbridge.printer.PrinterController
@@ -133,6 +134,8 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
         if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         else startForeground(NOTIF_ID, n)
         controller = PrinterController(File(filesDir, "history.json"), File(filesDir, "gcode").apply { mkdirs() }, this, settings.controllerSettings())
+        runCatching { controller.quirks = QuirkRegistry.parse(assets.open("quirks.json").bufferedReader().use { it.readText() }) }
+            .onFailure { Log.w(TAG, "quirks.json: $it") }
         applyRuntimeSettings()
         reconfigureServers("start")
         Thread(::renewalLoop, "tls-renewal").apply { isDaemon = true; priority = Thread.MIN_PRIORITY; start() }
@@ -151,6 +154,8 @@ class PrinterService : Service(), ControllerEvents, BridgeHost {
         intent?.let { i ->
             if (i.getBooleanExtra("stop", false)) { stopSelf(); return START_NOT_STICKY }
             i.getStringExtra("backend")?.let { settings.backend = it }
+            // fake backend only: answer as the SKR Mini E3 V3.0 + BLTouch (--es fake_profile skr) or as the Ender 3 (anything else)
+            if (i.hasExtra("fake_profile")) FakeMarlin.shared.skr = i.getStringExtra("fake_profile") == "skr"
             if (i.hasExtra("idle_temp_poll")) settings.idleTempPoll = i.getBooleanExtra("idle_temp_poll", true)
             if (i.hasExtra("real_settle_ms")) settings.realSettleMs = i.getLongExtra("real_settle_ms", 750)
             // diagnostics (adb only): log every bulk-IN packet length and every received line other than "ok"

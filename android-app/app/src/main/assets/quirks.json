@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "note": "Known boards and firmware builds. Matching is by substring of the M115 FIRMWARE_NAME (all 'match' strings must appear). 'known_missing_commands' seeds the profile; the app also learns more from 'echo:Unknown command'. 'quirks' texts are filled in by MCP batch 8.",
+  "boards": [
+    {
+      "key": "ender3-ch340-marlin-1.1.6.2",
+      "name": "Ender 3 stock board (CH340), Marlin 1.1.6.2, no Z probe",
+      "match": ["Marlin 1.1.6.2"],
+      "known_missing_commands": [],
+      "quirks": []
+    },
+    {
+      "key": "skr-mini-e3-v3-btt-bltouch-2022-03-11",
+      "name": "SKR Mini E3 V3.0 with BLTouch, BTT firmware (Marlin bugfix-2.0.x, Mar 11 2022 16:29:50)",
+      "match": ["Marlin bugfix-2.0.x", "Mar 11 2022 16:29:50"],
+      "known_missing_commands": [],
+      "quirks": []
+    }
+  ]
+}

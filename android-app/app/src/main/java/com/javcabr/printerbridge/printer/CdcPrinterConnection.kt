@@ -97,8 +97,8 @@ class CdcPrinterConnection(
     override fun writeLine(line: String) {
         if (readOnlyLock()) {
             val code = RealPrinterConnection.commandWord(line)
-            if (code !in RealPrinterConnection.READ_ONLY) throw SafetyLockException(
-                "real-printer safety lock is ON: '$code' refused (only ${RealPrinterConnection.READ_ONLY.joinToString()} allowed; disable the lock in Settings for the hardware pass)")
+            if (!RealPrinterConnection.isReadOnly(line)) throw SafetyLockException(
+                "real-printer safety lock is ON: '$code' refused (only ${RealPrinterConnection.READ_ONLY.joinToString()} and M211 without arguments allowed; disable the lock in Settings for the hardware pass)")
         }
         val i = io ?: throw IOException("not open")
         val bytes = (line + "\n").toByteArray(Charsets.ISO_8859_1)

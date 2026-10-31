@@ -8,6 +8,7 @@ import com.javcabr.printerbridge.printer.PrinterController
 import com.javcabr.printerbridge.printer.SafetyLockException
 import com.javcabr.printerbridge.service.AppSettings
 import fi.iki.elonen.NanoHTTPD
+import com.javcabr.printerbridge.BuildConfig
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -44,7 +45,11 @@ interface BridgeHost {
  */
 class ApiServer(private val context: Context, bindHost: String, port: Int, private val host: BridgeHost,
                 val secure: Boolean = false) : NanoHTTPD(bindHost, port) {
-    private val mcp = McpHandler { host.controller }
+    private val mcp = McpHandler({ host.controller }, {
+        JSONObject().put("version_name", BuildConfig.VERSION_NAME).put("version_code", BuildConfig.VERSION_CODE)
+            .put("git_commit", BuildConfig.GIT_COMMIT).put("git_dirty", BuildConfig.GIT_DIRTY)
+            .put("application_id", BuildConfig.APPLICATION_ID).put("build_type", BuildConfig.BUILD_TYPE)
+    })
 
     @Volatile private var filterCache: Pair<List<String>, SourceFilter>? = null
     private fun filter(): SourceFilter {
@@ -53,7 +58,37 @@ class ApiServer(private val context: Context, bindHost: String, port: Int, priva
         return SourceFilter(want).also { filterCache = want to it }
     }
 
+    /**
+     * Set once a handler has read (or streamed) the request body. NanoHTTPD keeps the connection open after a
+     * response, so a body left unread by an early 401/403/404 is parsed as the NEXT request line and the client
+     * sees "400 BAD REQUEST: Syntax error. HTTP verb {...}" instead of the real status.
+     */
+    private val bodyRead = ThreadLocal<Boolean>()
+
     override fun serve(s: IHTTPSession): Response {
+        bodyRead.set(false)
+        try {
+            val r = serveRequest(s)
+            if (!drainUnreadBody(s)) r.addHeader("Connection", "close")   // body too large to skip: don't reuse the connection
+            return r
+        } finally { bodyRead.remove() }
+    }
+
+    /** Skips a request body no handler read. False when it is too large to skip (the caller closes the connection). */
+    private fun drainUnreadBody(s: IHTTPSession): Boolean {
+        if (bodyRead.get() == true) return true
+        val n = contentLength(s)
+        if (n <= 0) return true
+        if (n > MAX_DRAIN) return false
+        val buf = ByteArray(4096)
+        var left = n
+        try {
+            while (left > 0) { val r = s.inputStream.read(buf, 0, minOf(left, buf.size.toLong()).toInt()); if (r < 0) return false; left -= r }
+        } catch (e: IOException) { return false }
+        return true
+    }
+
+    private fun serveRequest(s: IHTTPSession): Response {
         val path = s.uri.trimEnd('/').ifEmpty { "/" }
         // Source restriction first: before auth and routing, for every route (dashboard and /mcp too).
         val remote = s.remoteIpAddress
@@ -182,6 +217,11 @@ class ApiServer(private val context: Context, bindHost: String, port: Int, priva
                 if (b.has("time_scale")) o.put("fake_time_scale", b.getDouble("time_scale"))
                 if (b.has("inject_resend_every")) o.put("fake_inject_resend_every", b.getInt("inject_resend_every"))
                 host.settings.apply(o); host.applyRuntimeSettings()
+                // fake backend only; takes effect at the next connect (the capability profile is built then)
+                if (b.has("profile")) {
+                    require(b.getString("profile") in setOf("ender3", "skr")) { "profile must be ender3 or skr" }
+                    com.javcabr.printerbridge.printer.FakeMarlin.shared.skr = b.getString("profile") == "skr"
+                }
                 json(200, configJson())
             }
             else -> json(404, JSONObject().put("error", "no route ${m} $path"))
@@ -204,6 +244,7 @@ class ApiServer(private val context: Context, bindHost: String, port: Int, priva
     private fun contentLength(s: IHTTPSession): Long = s.headers["content-length"]?.toLongOrNull() ?: 0L
 
     private fun body(s: IHTTPSession): String {
+        bodyRead.set(true)
         val n = contentLength(s)
         require(n <= 1_000_000) { "body too large" }
         val buf = ByteArray(n.toInt())
@@ -216,6 +257,7 @@ class ApiServer(private val context: Context, bindHost: String, port: Int, priva
     private fun jbody(s: IHTTPSession): JSONObject { val b = body(s); return if (b.isBlank()) JSONObject() else JSONObject(b) }
 
     private fun saveUpload(s: IHTTPSession, f: File): Long {
+        bodyRead.set(true)
         val n = contentLength(s)
         require(n in 1..MAX_UPLOAD) { "need a Content-Length between 1 and $MAX_UPLOAD bytes" }
         require(host.controller.statusJson().optJSONObject("job")?.let { it.optString("file") == f.name && it.optString("state") in setOf("queued", "printing", "pausing", "paused", "resuming") } != true) {
@@ -244,6 +286,8 @@ class ApiServer(private val context: Context, bindHost: String, port: Int, priva
     companion object {
         const val TAG = "PrinterBridge.http"
         const val MAX_UPLOAD = 64L * 1024 * 1024
+        /** Largest unread request body skipped to keep a connection reusable; bigger ones close it. */
+        const val MAX_DRAIN = 1_000_000L
         val REASONS = mapOf(200 to "OK", 202 to "Accepted", 400 to "Bad Request", 401 to "Unauthorized", 403 to "Forbidden", 404 to "Not Found",
             405 to "Method Not Allowed", 409 to "Conflict", 500 to "Internal Server Error", 502 to "Bad Gateway")
         val GET_OK = setOf("/api/connection", "/api/config", "/api/config/telegram", "/api/tls", "/api/tls/cert.pem", "/api/tls/ca.pem")

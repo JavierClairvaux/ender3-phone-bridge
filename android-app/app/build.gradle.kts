@@ -13,6 +13,15 @@ val onlyAbi = project.findProperty("abi") as String?
 val defaultBackend = (project.findProperty("backend") as String?) ?: "fake"
 val appIdOverride = project.findProperty("appId") as String?
 
+// Git commit and dirty flag, reported by the MCP server_info tool. "unknown" when git is not available.
+fun git(vararg args: String): String? = try {
+    val p = ProcessBuilder(listOf("git") + args).directory(rootDir).redirectErrorStream(true).start()
+    val out = p.inputStream.bufferedReader().readText().trim()
+    if (p.waitFor() == 0) out else null
+} catch (e: Exception) { null }
+val gitCommit = git("rev-parse", "--short=10", "HEAD") ?: "unknown"
+val gitDirty = git("status", "--porcelain")?.isNotEmpty() ?: false
+
 android {
     namespace = "com.javcabr.printerbridge"
     compileSdk = 35
@@ -25,6 +34,8 @@ android {
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEFAULT_BACKEND", "\"$defaultBackend\"")
+        buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
+        buildConfigField("boolean", "GIT_DIRTY", "$gitDirty")
         ndk {
             abiFilters += if (onlyAbi != null) listOf(onlyAbi) else listOf("arm64-v8a", "x86_64")
         }

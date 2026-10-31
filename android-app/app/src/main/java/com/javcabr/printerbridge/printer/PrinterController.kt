@@ -84,6 +84,10 @@ class PrinterController(
     @Volatile var machineType: String? = null; private set
     /** Identity parsed from the M115 reply on connect (see [BoardInfo]); null until connected. */
     @Volatile var board: BoardInfo? = null; private set
+    /** What the board can do (M115 + M211 + M503 + quirks), built at connect; null until then. See [CapabilityProfile]. */
+    @Volatile var profile: CapabilityProfile? = null; private set
+    /** Known boards and firmware builds; the service loads it from the `quirks.json` asset. */
+    @Volatile var quirks: QuirkRegistry = QuirkRegistry.EMPTY
     @Volatile var halted = false; private set
 
     // temperatures / position
@@ -175,17 +179,17 @@ class PrinterController(
     val currentJobState: String? get() = job?.state?.wire
 
     /** Replace the connection (closing the old one, never resetting anything) and open [c]. */
-    fun connect(c: PrinterConnection): JSONObject = call("connect", 30_000) {
+    fun connect(c: PrinterConnection): JSONObject = call("connect", 60_000) {
         if (job?.state?.active == true) throw BusyException("a job is active (${job?.state?.wire}); cancel it first")
         closeConn()
         connState = "connecting"; connError = null; halted = false; homed = false
-        firmware = null; machineType = null; board = null   // a different board may be behind this connection
+        firmware = null; machineType = null; board = null; profile = null   // a different board may be behind this connection
         conn = c
         try {
             c.open()
             connState = "connected"
             say("connected (${c.kind})")
-            // Firmware identity (M115, read-only). Also the only command sent on connect.
+            // Firmware identity (M115, read-only), then M211 and M503 for the capability profile (also read-only).
             // A native-USB board can lose bytes out of a long burst (the SKR's CDC transmit buffer
             // overflows; on 2026-10-16 about half of the M115 replies came back with missing ranges),
             // so ask up to M115_ATTEMPTS times, keep the most complete answer and stop as soon as two
@@ -209,6 +213,7 @@ class PrinterController(
             board = BoardInfo.parse(reply)
             Log.i(TAG, "M115 reply (${reply.size} lines): ${reply.joinToString(" | ")}")
             say("firmware=$firmware machine=$machineType family=${board?.family} emergency_parser=${board?.emergencyParser}")
+            profile = board?.let { buildProfile(it) }
             lastPoll = 0
             // A job that lost its link earlier may have left the board's M85 timer running
             // (reconnecting doesn't reset the board). Only sends anything if we armed it.
@@ -221,6 +226,23 @@ class PrinterController(
         }
         connectionJson()
     } as JSONObject
+
+    /** Read-only `M211` and `M503` right after M115; a failure only leaves those fields empty (noted in the profile). */
+    private fun buildProfile(b: BoardInfo): CapabilityProfile {
+        val notes = ArrayList<String>()
+        fun ask(cmd: String): List<String> = try {
+            val r = sendAndWait(cmd, numbered = false, poke = false, maxWaitMs = 10_000)
+            if (r.any { it.contains("Unknown command") }) { notes.add("$cmd: unknown command"); emptyList() } else r
+        } catch (e: PrinterHaltedException) { throw e
+        } catch (e: SafetyLockException) { notes.add("$cmd refused by the safety lock"); emptyList()
+        } catch (e: Exception) { if (conn?.isOpen != true) throw e; notes.add("$cmd failed: ${e.message}"); emptyList() }
+        val m211 = if (b.kind == "marlin") ask("M211") else emptyList()
+        val m503 = if (b.kind == "marlin") ask("M503") else emptyList()
+        val q = quirks.find(b.firmwareName)
+        if (q == null) notes.add("firmware build not in the quirks registry")
+        say("profile: board=${q?.key ?: "unknown"} limits=${CapabilityProfile.parseLimits(m211)} notes=$notes")
+        return CapabilityProfile(b, q, m211, m503, notes)
+    }
 
     fun disconnect(): JSONObject = call("disconnect", 10_000) {
         if (job?.state?.active == true) throw BusyException("a job is active (${job?.state?.wire}); cancel it first")
@@ -335,7 +357,7 @@ class PrinterController(
 
     /** Send one ad-hoc command and return the reply lines. While a job is active, only M105/M114/M115/M119/M503. */
     fun sendGcode(cmd: String): JSONObject {
-        if (RealPrinterConnection.commandWord(cmd) !in RealPrinterConnection.READ_ONLY) refuseIfJobActive(gcode = true)
+        if (!RealPrinterConnection.isReadOnly(cmd)) refuseIfJobActive(gcode = true)
         return gcodeTask(cmd)
     }
 
@@ -346,9 +368,9 @@ class PrinterController(
         // Any active job state (queued/printing/pausing/paused/resuming) owns the machine: a paused
         // job is parked and will move back to its saved position on resume, so manual motion or
         // heater changes in between would ruin the print or crash the head.
-        if (j != null && j.state.active && RealPrinterConnection.commandWord(cmd) !in RealPrinterConnection.READ_ONLY)
+        if (j != null && j.state.active && !RealPrinterConnection.isReadOnly(cmd))
             throw BusyException("refused: a print job is ${j.state.wire}; only read-only commands " +
-                "(${RealPrinterConnection.READ_ONLY.joinToString()}) are allowed until it is done or cancelled")
+                "(${RealPrinterConnection.READ_ONLY.joinToString()}, M211 without arguments) are allowed until it is done or cancelled")
         JSONObject().put("command", cmd).put("reply", JSONArray(sendAndWait(cmd.trim(), numbered = false)))
     } as JSONObject
 
@@ -396,6 +418,7 @@ class PrinterController(
         val o = JSONObject().put("state", connState).put("backend", conn?.kind ?: JSONObject.NULL)
             .put("error", connError ?: JSONObject.NULL).put("firmware", firmware ?: JSONObject.NULL)
             .put("machine_type", machineType ?: JSONObject.NULL).put("board", board?.toJson() ?: JSONObject.NULL)
+            .put("profile", profile?.toJson() ?: JSONObject.NULL)
             .put("halted", halted)
             .put("lines_sent_total", linesSentTotal).put("last_rx", lastLineRx ?: JSONObject.NULL)
         conn?.info()?.let { info -> o.put("details", JSONObject(info.mapValues { it.value ?: JSONObject.NULL })) }
@@ -750,6 +773,7 @@ class PrinterController(
         val c = conn ?: return
         try { c.close() } catch (t: Throwable) { Log.w(TAG, "close: $t") }
         conn = null
+        profile = null   // capabilities belong to a live connection; tools then answer "not connected"
     }
 
     /** Caller-thread pre-check (the worker re-checks authoritatively before sending anything). */
@@ -757,7 +781,7 @@ class PrinterController(
         val j = job ?: return
         if (!j.state.active) return
         throw BusyException(if (gcode) "refused: a print job is ${j.state.wire}; only read-only commands " +
-            "(${RealPrinterConnection.READ_ONLY.joinToString()}) are allowed until it is done or cancelled"
+            "(${RealPrinterConnection.READ_ONLY.joinToString()}, M211 without arguments) are allowed until it is done or cancelled"
             else "refused: a print job is ${j.state.wire}; homing, motion and board reset are not allowed until it is done or cancelled")
     }
 
@@ -818,6 +842,8 @@ class PrinterController(
                 continue
             }
             lastRx = now
+            // only when the firmware's echo names the word we sent: a byte lost on the link garbles the word and must not poison the profile
+            if (l.contains("Unknown command")) RealPrinterConnection.commandWord(cmd).let { w -> if (w.isNotEmpty() && l.uppercase().contains("\"$w")) profile?.learnMissing(w) }
             handleLine(l)
             out.add(l)
             val rs = Regex("^(?:Resend:|rs)\\s*N?(\\d+)").find(l)

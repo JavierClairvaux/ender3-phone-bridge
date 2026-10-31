@@ -76,8 +76,8 @@ class RealPrinterConnection(
     override fun writeLine(line: String) {
         if (readOnlyLock()) {
             val code = commandWord(line)
-            if (code !in READ_ONLY) throw SafetyLockException(
-                "real-printer safety lock is ON: '$code' refused (only ${READ_ONLY.joinToString()} allowed; disable the lock in Settings for the hardware pass)")
+            if (!isReadOnly(line)) throw SafetyLockException(
+                "real-printer safety lock is ON: '$code' refused (only ${READ_ONLY.joinToString()} and M211 without arguments allowed; disable the lock in Settings for the hardware pass)")
         }
         val l = link ?: throw IOException("not open")
         try { l.callAttr("write_line", line); linesWritten++ } catch (e: PyException) { throw IOException("write failed: ${e.message}", e) }
@@ -108,6 +108,16 @@ class RealPrinterConnection(
     companion object {
         const val TAG = "PrinterBridge.real"
         val READ_ONLY = setOf("M115", "M105", "M503", "M114", "M119")
+
+        /** Read-only reports, plus `M211` with no arguments (with arguments it changes the soft limits). */
+        fun isReadOnly(line: String): Boolean {
+            val word = commandWord(line)
+            if (word in READ_ONLY) return true
+            if (word != "M211") return false
+            var s = line.substringBefore('*').substringBefore(';').trim()
+            if (s.startsWith("N")) s = s.substringAfter(' ', "").trim()
+            return s.split(Regex("\\s+")).size == 1
+        }
 
         /** First G/M word of a line, ignoring an "N123 " prefix and "*cs" suffix. */
         fun commandWord(line: String): String {
